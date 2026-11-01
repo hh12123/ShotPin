@@ -5,7 +5,7 @@ using System.Drawing;
 namespace ShotPin.Core
 {
     /// <summary>
-    /// 悬浮图摆放、缩放和连线端点的纯几何逻辑。
+    /// 悬浮图缩放、摆放和屏幕可见性计算的纯几何逻辑。
     /// </summary>
     public static class GeometryUtil
     {
@@ -27,99 +27,6 @@ namespace ShotPin.Core
                 return MaxZoom;
             }
             return zoom;
-        }
-
-        /// <summary>
-        /// 计算两张图片边框之间的连线端点：从两个矩形中心连线，取各自边框上的交点。
-        /// 矩形重叠或中心重合时退回最近边框点，保证不抛异常。
-        /// </summary>
-        public static void GetEdgePoints(Rectangle a, Rectangle b, out Point pointA, out Point pointB)
-        {
-            if (a.Width <= 0)
-            {
-                a.Width = 1;
-            }
-            if (a.Height <= 0)
-            {
-                a.Height = 1;
-            }
-            if (b.Width <= 0)
-            {
-                b.Width = 1;
-            }
-            if (b.Height <= 0)
-            {
-                b.Height = 1;
-            }
-
-            Point centerA = new Point(a.Left + a.Width / 2, a.Top + a.Height / 2);
-            Point centerB = new Point(b.Left + b.Width / 2, b.Top + b.Height / 2);
-
-            if (centerA.X == centerB.X && centerA.Y == centerB.Y)
-            {
-                if (a.Left <= b.Left)
-                {
-                    pointA = new Point(a.Right - 1, centerA.Y);
-                    pointB = new Point(b.Left, centerB.Y);
-                }
-                else
-                {
-                    pointA = new Point(a.Left, centerA.Y);
-                    pointB = new Point(b.Right - 1, centerB.Y);
-                }
-                return;
-            }
-
-            pointA = IntersectRay(a, centerA, centerB.X - centerA.X, centerB.Y - centerA.Y);
-            pointB = IntersectRay(b, centerB, centerA.X - centerB.X, centerA.Y - centerB.Y);
-        }
-
-        private static Point IntersectRay(Rectangle rect, Point origin, float dx, float dy)
-        {
-            float tx = float.MaxValue;
-            float ty = float.MaxValue;
-            if (dx > 0.0001f)
-            {
-                tx = (rect.Right - origin.X) / dx;
-            }
-            else if (dx < -0.0001f)
-            {
-                tx = (rect.Left - origin.X) / dx;
-            }
-            if (dy > 0.0001f)
-            {
-                ty = (rect.Bottom - origin.Y) / dy;
-            }
-            else if (dy < -0.0001f)
-            {
-                ty = (rect.Top - origin.Y) / dy;
-            }
-
-            float t = Math.Min(tx, ty);
-            if (t == float.MaxValue || t <= 0f)
-            {
-                return origin;
-            }
-
-            int x = (int)Math.Round(origin.X + dx * t);
-            int y = (int)Math.Round(origin.Y + dy * t);
-            if (x < rect.Left)
-            {
-                x = rect.Left;
-            }
-            if (x > rect.Right - 1)
-            {
-                x = rect.Right - 1;
-            }
-            if (y < rect.Top)
-            {
-                y = rect.Top;
-            }
-            if (y > rect.Bottom - 1)
-            {
-                y = rect.Bottom - 1;
-            }
-            return new Point(x, y);
         }
 
         /// <summary>

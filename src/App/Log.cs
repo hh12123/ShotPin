@@ -12,21 +12,11 @@ namespace ShotPin.App
     {
         private static readonly object Sync = new object();
         private static bool _initialized;
-        private static string _dataDir;
         private static string _logDir;
 
         public static string DataDir
         {
-            get
-            {
-                if (_dataDir == null)
-                {
-                    _dataDir = Path.Combine(
-                        Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-                        "ShotPin");
-                }
-                return _dataDir;
-            }
+            get { return AppPaths.DataDir; }
         }
 
         public static string LogDir

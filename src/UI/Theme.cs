@@ -147,11 +147,12 @@ namespace ShotPin.UI
                 }
                 else if (action == 2)
                 {
-                    // link: two small circles joined by a line
-                    int r = Math.Max(2, (int)Math.Round(3 * scale));
-                    graphics.DrawEllipse(pen, cx - arm - r, cy - r, r * 2, r * 2);
-                    graphics.DrawEllipse(pen, cx + arm - r, cy - r, r * 2, r * 2);
-                    graphics.DrawLine(pen, cx - arm + r, cy, cx + arm - r, cy);
+                    // hang: a clothesline with something dangling from it
+                    int lineY = cy - arm + 1;
+                    graphics.DrawLine(pen, cx - arm, lineY, cx + arm, lineY);
+                    graphics.DrawLine(pen, cx, lineY, cx, cy + arm - 4);
+                    int r = Math.Max(2, (int)Math.Round(2.5 * scale));
+                    graphics.DrawEllipse(pen, cx - r, cy + arm - 4 - r, r * 2, r * 2);
                 }
             }
         }

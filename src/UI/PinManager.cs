@@ -1,7 +1,6 @@
 using System;
 using System.Collections.Generic;
 using System.Drawing;
-using System.IO;
 using System.Windows.Forms;
 using ShotPin.App;
 using ShotPin.Core;
@@ -9,7 +8,7 @@ using ShotPin.Core;
 namespace ShotPin.UI
 {
     /// <summary>
-    /// 管理所有悬浮图：创建、级联摆放、显隐、关闭，以及右键菜单动作。
+    /// 管理所有悬浮图：创建、挂到装饰线上、显隐、关闭，以及右键菜单动作。
     /// </summary>
     internal sealed class PinManager : IDisposable
     {
@@ -19,46 +18,7 @@ namespace ShotPin.UI
         private bool _boardVisible = true;
         private bool _disposed;
 
-        public ConnectorManager Connectors { get; set; }
-
-        public bool IsLinkMode
-        {
-            get { return Connectors != null && Connectors.IsLinkMode; }
-        }
-
-        public Guid LinkSourceId
-        {
-            get { return Connectors == null ? Guid.Empty : Connectors.LinkSourceId; }
-        }
-
-        public void BeginLink(Guid sourceId)
-        {
-            if (Connectors != null)
-            {
-                Connectors.BeginLink(sourceId);
-            }
-        }
-
-        public void CompleteLink(Guid targetId)
-        {
-            if (Connectors != null)
-            {
-                Connectors.CompleteLink(targetId);
-            }
-        }
-
-        public void CancelLinkMode()
-        {
-            if (Connectors != null)
-            {
-                Connectors.CancelLinkMode();
-            }
-        }
-
-        public bool CancelLinkModeIfActive()
-        {
-            return Connectors != null && Connectors.CancelLinkModeIfActive();
-        }
+        public ClotheslineManager Clothesline { get; set; }
 
         public PinManager(TrayAppContext app)
         {
@@ -87,6 +47,21 @@ namespace ShotPin.UI
             return null;
         }
 
+        public int LineYAtScreen(int screenX)
+        {
+            return Clothesline == null ? 0 : Clothesline.LineYAtScreen(screenX);
+        }
+
+        public int HangGap
+        {
+            get { return Clothesline == null ? 0 : Clothesline.HangGap; }
+        }
+
+        public bool IsNearLine(PinForm pin)
+        {
+            return Clothesline != null && Clothesline.IsNearLine(pin);
+        }
+
         public PinForm CreatePin(Bitmap image, Rectangle screenRect)
         {
             if (image == null)
@@ -97,27 +72,75 @@ namespace ShotPin.UI
             PinForm pin = null;
             try
             {
-                Point center = new Point(screenRect.Left + screenRect.Width / 2, screenRect.Top + screenRect.Height / 2);
+                Point center = new Point(
+                    screenRect.Left + screenRect.Width / 2,
+                    screenRect.Top + screenRect.Height / 2);
                 Screen screen = Screen.FromPoint(center);
                 Rectangle work = screen.WorkingArea;
-                float zoom = GeometryUtil.FitZoom(image.Size, work);
-                Size windowSize = GeometryUtil.WindowSizeForZoom(image.Size, zoom, 2);
 
-                Rectangle desired = new Rectangle(screenRect.Left, screenRect.Top, windowSize.Width, windowSize.Height);
-                List<Rectangle> existing = new List<Rectangle>();
-                for (int i = 0; i < _pins.Count; i++)
+                float zoom = GeometryUtil.FitZoom(image.Size, work);
+                int gap = Clothesline == null ? 0 : Clothesline.HangGap;
+                int lineY = Clothesline == null
+                    ? work.Top
+                    : Clothesline.LineYAtScreen(center.X);
+                int availableBelowLine = work.Bottom - (lineY + gap) - 8;
+                if (availableBelowLine > 40)
                 {
-                    existing.Add(_pins[i].ScreenBounds);
+                    zoom = Math.Min(zoom, availableBelowLine / (float)image.Height);
                 }
-                Rectangle placed = GeometryUtil.CascadePlacement(desired, work, existing);
+                zoom = GeometryUtil.ClampZoom(zoom);
+
+                Size windowSize = GeometryUtil.WindowSizeForZoom(image.Size, zoom, 2);
+                int desiredLeft = screenRect.Left;
+                int left;
+                int top;
+                if (Clothesline != null)
+                {
+                    left = ClotheslineLayout.PlaceOnLine(
+                        desiredLeft,
+                        windowSize.Width,
+                        work.Left,
+                        work.Right,
+                        GetHungBounds(),
+                        8);
+                    top = Clothesline.LineYAtScreen(left + windowSize.Width / 2) + gap;
+
+                    int room = work.Bottom - top - 8;
+                    if (room > 40 && windowSize.Height > room)
+                    {
+                        zoom = GeometryUtil.ClampZoom(room / (float)image.Height);
+                        windowSize = GeometryUtil.WindowSizeForZoom(image.Size, zoom, 2);
+                        left = ClotheslineLayout.PlaceOnLine(
+                            desiredLeft,
+                            windowSize.Width,
+                            work.Left,
+                            work.Right,
+                            GetHungBounds(),
+                            8);
+                        top = Clothesline.LineYAtScreen(left + windowSize.Width / 2) + gap;
+                    }
+                }
+                else
+                {
+                    Rectangle desired = new Rectangle(desiredLeft, work.Top + 20, windowSize.Width, windowSize.Height);
+                    List<Rectangle> existing = new List<Rectangle>();
+                    for (int i = 0; i < _pins.Count; i++)
+                    {
+                        existing.Add(_pins[i].ScreenBounds);
+                    }
+                    Rectangle placed = GeometryUtil.CascadePlacement(desired, work, existing);
+                    left = placed.Left;
+                    top = placed.Top;
+                }
 
                 _counter++;
                 string name = "截图 " + _counter;
-                pin = new PinForm(this, Guid.NewGuid(), name, image, placed, zoom);
+                Rectangle bounds = new Rectangle(left, top, windowSize.Width, windowSize.Height);
+                pin = new PinForm(this, Guid.NewGuid(), name, image, bounds, zoom, Clothesline != null);
                 pin.FormClosed += OnPinClosed;
                 _pins.Add(pin);
                 image = null; // 所有权已转移给 PinForm
-                Log.Info("pin created: " + name + " bounds=" + pin.Bounds + " zoom=" + zoom.ToString("0.000"));
+                Log.Info("pin created: " + name + " bounds=" + pin.Bounds + " zoom=" + zoom.ToString("0.000") + " hung=" + pin.IsHung);
 
                 if (!_boardVisible)
                 {
@@ -129,9 +152,9 @@ namespace ShotPin.UI
                 }
                 pin.Activate();
                 pin.Refresh();
-                if (Connectors != null)
+                if (Clothesline != null)
                 {
-                    Connectors.RequestRepaint();
+                    Clothesline.NotifyHungChanged(pin);
                 }
 
                 if (_app.Settings.AutoCopy)
@@ -166,6 +189,19 @@ namespace ShotPin.UI
             }
         }
 
+        private List<Rectangle> GetHungBounds()
+        {
+            List<Rectangle> result = new List<Rectangle>();
+            for (int i = 0; i < _pins.Count; i++)
+            {
+                if (_pins[i].IsHung)
+                {
+                    result.Add(_pins[i].ScreenBounds);
+                }
+            }
+            return result;
+        }
+
         private void OnPinClosed(object sender, FormClosedEventArgs e)
         {
             PinForm pin = sender as PinForm;
@@ -175,18 +211,26 @@ namespace ShotPin.UI
             }
             _pins.Remove(pin);
             pin.FormClosed -= OnPinClosed;
-            if (Connectors != null)
+            if (Clothesline != null)
             {
-                Connectors.OnImageClosed(pin.Id);
+                Clothesline.OnPinClosed(pin.Id);
             }
             Log.Info("pin closed: " + pin.PinName);
         }
 
         public void NotifyGeometryChanged(PinForm pin)
         {
-            if (Connectors != null)
+            if (Clothesline != null)
             {
-                Connectors.RequestRepaint();
+                Clothesline.RequestRepaint();
+            }
+        }
+
+        public void NotifyHungChanged(PinForm pin)
+        {
+            if (Clothesline != null)
+            {
+                Clothesline.NotifyHungChanged(pin);
             }
         }
 
@@ -200,9 +244,9 @@ namespace ShotPin.UI
             {
                 _pins[i].Hide();
             }
-            if (Connectors != null)
+            if (Clothesline != null)
             {
-                Connectors.Hide();
+                Clothesline.Hide();
             }
             return true;
         }
@@ -226,9 +270,9 @@ namespace ShotPin.UI
                     _pins[i].Show();
                 }
             }
-            if (Connectors != null)
+            if (Clothesline != null)
             {
-                Connectors.Show();
+                Clothesline.Show();
             }
         }
 
@@ -239,9 +283,9 @@ namespace ShotPin.UI
             {
                 _pins[i].Hide();
             }
-            if (Connectors != null)
+            if (Clothesline != null)
             {
-                Connectors.Hide();
+                Clothesline.Hide();
             }
         }
 
@@ -272,9 +316,41 @@ namespace ShotPin.UI
                 }
             }
             _pins.Clear();
-            if (Connectors != null)
+            if (Clothesline != null)
             {
-                Connectors.ClearAll();
+                Clothesline.RequestRepaint();
+            }
+        }
+
+        public void HangPin(PinForm pin)
+        {
+            if (pin == null)
+            {
+                return;
+            }
+            if (Clothesline != null)
+            {
+                Clothesline.HangPin(pin);
+            }
+            else
+            {
+                pin.SetHung(true);
+            }
+        }
+
+        public void UnhangPin(PinForm pin)
+        {
+            if (pin == null)
+            {
+                return;
+            }
+            if (Clothesline != null)
+            {
+                Clothesline.UnhangPin(pin);
+            }
+            else
+            {
+                pin.SetHung(false);
             }
         }
 
@@ -347,44 +423,22 @@ namespace ShotPin.UI
             saveAs.ShortcutKeyDisplayString = "Ctrl+S";
 
             menu.Items.Add(new ToolStripSeparator());
+
+            string hangText = pin.IsHung ? "从挂线取下" : "挂到挂线";
+            menu.Items.Add(new ToolStripMenuItem(hangText, null, delegate
+            {
+                if (pin.IsHung)
+                {
+                    UnhangPin(pin);
+                }
+                else
+                {
+                    HangPin(pin);
+                }
+            }));
+
             menu.Items.Add(new ToolStripMenuItem("适应屏幕", null, delegate { pin.FitToScreen(); }));
             menu.Items.Add(new ToolStripMenuItem("100%", null, delegate { pin.ResetZoom(); }));
-
-            menu.Items.Add(new ToolStripSeparator());
-
-            ToolStripMenuItem connect = new ToolStripMenuItem("连线到");
-            int others = 0;
-            for (int i = 0; i < _pins.Count; i++)
-            {
-                PinForm other = _pins[i];
-                if (other.Id == pin.Id)
-                {
-                    continue;
-                }
-                others++;
-                Guid targetId = other.Id;
-                ToolStripMenuItem targetItem = new ToolStripMenuItem(other.PinName);
-                targetItem.Click += delegate
-                {
-                    if (Connectors != null)
-                    {
-                        Connectors.Connect(pin.Id, targetId);
-                    }
-                };
-                connect.DropDownItems.Add(targetItem);
-            }
-            connect.Enabled = others > 0;
-            menu.Items.Add(connect);
-
-            bool hasLinks = Connectors != null && Connectors.HasLinks(pin.Id);
-            ToolStripItem unlink = menu.Items.Add("断开所有连线", null, delegate
-            {
-                if (Connectors != null)
-                {
-                    Connectors.RemoveAllFor(pin.Id);
-                }
-            });
-            unlink.Enabled = hasLinks;
 
             menu.Items.Add(new ToolStripSeparator());
             ToolStripMenuItem close = (ToolStripMenuItem)menu.Items.Add("关闭", null, delegate { pin.Close(); });

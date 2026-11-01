@@ -9,7 +9,7 @@ using ShotPin.Core;
 namespace ShotPin.UI
 {
     /// <summary>
-    /// 一张悬浮截图。无边框、置顶、自绘；拖动、缩放、工具条和右键菜单都在这里。
+    /// 一张悬浮截图。无边框、置顶、自绘；可以挂在桌面装饰挂线上，也可以取下自由悬浮。
     /// </summary>
     internal sealed class PinForm : Form
     {
@@ -19,6 +19,7 @@ namespace ShotPin.UI
         private string _name;
         private float _zoom;
         private readonly int _border = 2;
+        private bool _hung;
 
         private bool _dragging;
         private Point _dragStartCursor;
@@ -31,13 +32,21 @@ namespace ShotPin.UI
 
         private readonly ContextMenuStrip _menu;
 
-        public PinForm(PinManager manager, Guid id, string name, Bitmap image, Rectangle desiredBounds, float zoom)
+        public PinForm(
+            PinManager manager,
+            Guid id,
+            string name,
+            Bitmap image,
+            Rectangle desiredBounds,
+            float zoom,
+            bool hung)
         {
             _manager = manager;
             _id = id;
             _name = name;
             _image = image;
             _zoom = GeometryUtil.ClampZoom(zoom);
+            _hung = hung;
 
             FormBorderStyle = FormBorderStyle.None;
             ShowInTaskbar = false;
@@ -81,6 +90,11 @@ namespace ShotPin.UI
             get { return _zoom; }
         }
 
+        public bool IsHung
+        {
+            get { return _hung; }
+        }
+
         public Rectangle ScreenBounds
         {
             get { return Bounds; }
@@ -89,6 +103,42 @@ namespace ShotPin.UI
         private int Scale(int value)
         {
             return Theme.Scale(this, value);
+        }
+
+        /// <summary>
+        /// 由管理器调用：挂线高度变化或被挂上时，把窗口顶部对齐到挂线下方。
+        /// </summary>
+        internal void SyncHungPosition()
+        {
+            if (!_hung)
+            {
+                return;
+            }
+            int centerX = Left + Width / 2;
+            int top = _manager.LineYAtScreen(centerX) + _manager.HangGap;
+            if (Top != top)
+            {
+                Bounds = new Rectangle(Left, top, Width, Height);
+            }
+        }
+
+        public void SetHung(bool hung)
+        {
+            if (_hung == hung)
+            {
+                if (hung)
+                {
+                    SyncHungPosition();
+                }
+                return;
+            }
+            _hung = hung;
+            if (_hung)
+            {
+                SyncHungPosition();
+            }
+            Invalidate();
+            _manager.NotifyHungChanged(this);
         }
 
         public void SetZoom(float zoom, bool keepCenter)
@@ -100,12 +150,23 @@ namespace ShotPin.UI
             }
             Rectangle old = Bounds;
             Size size = GeometryUtil.WindowSizeForZoom(_image.Size, zoom, _border);
-            int x = old.Left;
-            int y = old.Top;
-            if (keepCenter)
+            int x;
+            int y;
+            if (_hung)
             {
-                x -= (size.Width - old.Width) / 2;
-                y -= (size.Height - old.Height) / 2;
+                int centerX = old.Left + old.Width / 2;
+                x = centerX - size.Width / 2;
+                y = _manager.LineYAtScreen(centerX) + _manager.HangGap;
+            }
+            else
+            {
+                x = old.Left;
+                y = old.Top;
+                if (keepCenter)
+                {
+                    x -= (size.Width - old.Width) / 2;
+                    y -= (size.Height - old.Height) / 2;
+                }
             }
             _zoom = zoom;
             Bounds = new Rectangle(x, y, size.Width, size.Height);
@@ -127,15 +188,42 @@ namespace ShotPin.UI
                 return;
             }
             float zoom = GeometryUtil.FitZoom(_image.Size, screen.WorkingArea);
+            if (_hung)
+            {
+                int line = _manager.LineYAtScreen(Left + Width / 2) + _manager.HangGap;
+                int available = screen.WorkingArea.Bottom - line - Scale(8);
+                if (available > 40)
+                {
+                    zoom = Math.Min(zoom, available / (float)_image.Height);
+                }
+            }
             SetZoom(zoom, true);
-            Rectangle bounds = GeometryUtil.ClampToWorkArea(Bounds, screen.WorkingArea);
-            Bounds = bounds;
+            if (_hung)
+            {
+                SyncHungPosition();
+            }
+            else
+            {
+                Bounds = GeometryUtil.ClampToWorkArea(Bounds, screen.WorkingArea);
+            }
             _manager.NotifyGeometryChanged(this);
         }
 
         public void MoveBy(int dx, int dy)
         {
-            Location = new Point(Left + dx, Top + dy);
+            if (_hung)
+            {
+                if (dx == 0)
+                {
+                    return;
+                }
+                Location = new Point(Left + dx, Top);
+                SyncHungPosition();
+            }
+            else
+            {
+                Location = new Point(Left + dx, Top + dy);
+            }
             _manager.NotifyGeometryChanged(this);
         }
 
@@ -176,7 +264,7 @@ namespace ShotPin.UI
             graphics.DrawImage(_image, imageRect);
             graphics.SmoothingMode = SmoothingMode.AntiAlias;
 
-            Color borderColor = (_manager.IsLinkMode || ContainsFocus) ? Theme.Accent : Theme.Border;
+            Color borderColor = ContainsFocus ? Theme.Accent : Theme.Border;
             using (Pen borderPen = new Pen(borderColor, 2.0f))
             {
                 int inset = 1;
@@ -187,11 +275,6 @@ namespace ShotPin.UI
             if (_hover && !_dragging)
             {
                 DrawToolbar(graphics);
-            }
-
-            if (_manager.IsLinkMode && _manager.LinkSourceId == _id)
-            {
-                DrawLinkHint(graphics);
             }
 
             if (_badgeVisible)
@@ -207,27 +290,8 @@ namespace ShotPin.UI
             {
                 Color background = (i == _hoverButton) ? Theme.AccentSoft : Theme.Panel;
                 Theme.FillRounded(graphics, hits[i].Bounds, Scale(4), background);
-                Theme.DrawButtonIcon(graphics, hits[i].Bounds, hits[i].Action, Theme.Text);
-            }
-        }
-
-        private void DrawLinkHint(Graphics graphics)
-        {
-            string hint = "点击另一张图片完成连线 · Esc 取消";
-            SizeF size = graphics.MeasureString(hint, Theme.SmallFont);
-            int paddingX = Scale(8);
-            int paddingY = Scale(4);
-            int width = (int)Math.Ceiling(size.Width) + paddingX * 2;
-            int height = (int)Math.Ceiling(size.Height) + paddingY * 2;
-            if (width > Width - Scale(8) || height > Height - Scale(8))
-            {
-                return;
-            }
-            Rectangle box = new Rectangle((Width - width) / 2, Scale(6), width, height);
-            Theme.FillRounded(graphics, box, Scale(4), Theme.Panel);
-            using (SolidBrush brush = new SolidBrush(Theme.Text))
-            {
-                graphics.DrawString(hint, Theme.SmallFont, brush, box.Left + paddingX, box.Top + paddingY);
+                Color iconColor = (hits[i].Action == 2 && _hung) ? Theme.Accent : Theme.Text;
+                Theme.DrawButtonIcon(graphics, hits[i].Bounds, hits[i].Action, iconColor);
             }
         }
 
@@ -329,12 +393,6 @@ namespace ShotPin.UI
                 return;
             }
 
-            if (_manager.IsLinkMode)
-            {
-                _manager.CompleteLink(_id);
-                return;
-            }
-
             PinHit hit = HitToolbar(e.Location);
             if (hit != null)
             {
@@ -355,16 +413,34 @@ namespace ShotPin.UI
             if (_dragging)
             {
                 Point current = Cursor.Position;
-                Location = new Point(
-                    _dragStartLocation.X + (current.X - _dragStartCursor.X),
-                    _dragStartLocation.Y + (current.Y - _dragStartCursor.Y));
-                _manager.NotifyGeometryChanged(this);
-                return;
-            }
+                int dx = current.X - _dragStartCursor.X;
+                int dy = current.Y - _dragStartCursor.Y;
 
-            if (_manager.IsLinkMode)
-            {
-                Cursor = Cursors.Cross;
+                if (_hung)
+                {
+                    if (dy > Scale(26))
+                    {
+                        _hung = false;
+                        _dragStartCursor = current;
+                        _dragStartLocation = Location;
+                        dx = 0;
+                        dy = 0;
+                        _manager.NotifyHungChanged(this);
+                    }
+                    else
+                    {
+                        int newLeft = _dragStartLocation.X + dx;
+                        int top = _manager.LineYAtScreen(newLeft + Width / 2) + _manager.HangGap;
+                        Location = new Point(newLeft, top);
+                        _manager.NotifyGeometryChanged(this);
+                        return;
+                    }
+                }
+
+                Location = new Point(
+                    _dragStartLocation.X + dx,
+                    _dragStartLocation.Y + dy);
+                _manager.NotifyGeometryChanged(this);
                 return;
             }
 
@@ -382,11 +458,6 @@ namespace ShotPin.UI
             base.OnMouseUp(e);
             if (e.Button == MouseButtons.Right)
             {
-                if (_manager.IsLinkMode)
-                {
-                    _manager.CancelLinkMode();
-                    return;
-                }
                 _manager.PopulateMenu(_menu, this);
                 _menu.Show(this, e.Location);
                 return;
@@ -399,8 +470,42 @@ namespace ShotPin.UI
             Capture = false;
             Cursor = Cursors.SizeAll;
 
-            Rectangle screen = SystemInformation.VirtualScreen;
-            Bounds = GeometryUtil.KeepReachable(Bounds, screen, Scale(40));
+            bool hungChanged = false;
+            if (!_hung && _manager.IsNearLine(this))
+            {
+                _hung = true;
+                hungChanged = true;
+            }
+            if (_hung)
+            {
+                SyncHungPosition();
+                Rectangle screen = SystemInformation.VirtualScreen;
+                int minLeft = screen.Left - Width + Scale(48);
+                int maxLeft = screen.Right - Scale(48);
+                int left = Left;
+                if (left < minLeft)
+                {
+                    left = minLeft;
+                }
+                if (left > maxLeft)
+                {
+                    left = maxLeft;
+                }
+                if (left != Left)
+                {
+                    Location = new Point(left, Top);
+                }
+                SyncHungPosition();
+            }
+            else
+            {
+                Bounds = GeometryUtil.KeepReachable(Bounds, SystemInformation.VirtualScreen, Scale(40));
+            }
+
+            if (hungChanged)
+            {
+                _manager.NotifyHungChanged(this);
+            }
             _manager.NotifyGeometryChanged(this);
             Invalidate();
         }
@@ -437,7 +542,14 @@ namespace ShotPin.UI
             }
             else if (action == 2)
             {
-                _manager.BeginLink(_id);
+                if (_hung)
+                {
+                    _manager.UnhangPin(this);
+                }
+                else
+                {
+                    _manager.HangPin(this);
+                }
             }
         }
 
@@ -445,10 +557,6 @@ namespace ShotPin.UI
         {
             if (keyData == Keys.Escape)
             {
-                if (_manager.CancelLinkModeIfActive())
-                {
-                    return true;
-                }
                 Close();
                 return true;
             }
@@ -494,21 +602,6 @@ namespace ShotPin.UI
                 return true;
             }
             return base.ProcessCmdKey(ref msg, keyData);
-        }
-
-        protected override void WndProc(ref Message m)
-        {
-            if (m.Msg == Native.WM_MOUSEACTIVATE && _manager.IsLinkMode && _manager.LinkSourceId != _id)
-            {
-                m.Result = new IntPtr(Native.MA_NOACTIVATE);
-                return;
-            }
-            if (m.Msg == 0x007B && _manager.IsLinkMode)
-            {
-                _manager.CancelLinkMode();
-                return;
-            }
-            base.WndProc(ref m);
         }
 
         protected override void Dispose(bool disposing)

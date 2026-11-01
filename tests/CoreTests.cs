@@ -40,7 +40,7 @@ namespace ShotPin.Tests
             TestHotkeys();
             TestIni();
             TestGeometry();
-            TestLinks();
+            TestClothesline();
 
             Console.WriteLine("------------------");
             Console.WriteLine("passed=" + _passed + " failed=" + _failed);
@@ -137,29 +137,6 @@ namespace ShotPin.Tests
 
         private static void TestGeometry()
         {
-            Point pa;
-            Point pb;
-
-            GeometryUtil.GetEdgePoints(new Rectangle(0, 0, 100, 100), new Rectangle(200, 0, 100, 100), out pa, out pb);
-            Check(pa == new Point(99, 50), "edge horizontal A");
-            Check(pb == new Point(200, 50), "edge horizontal B");
-
-            GeometryUtil.GetEdgePoints(new Rectangle(0, 0, 100, 100), new Rectangle(0, 200, 100, 100), out pa, out pb);
-            Check(pa == new Point(50, 99), "edge vertical A");
-            Check(pb == new Point(50, 200), "edge vertical B");
-
-            GeometryUtil.GetEdgePoints(new Rectangle(0, 0, 100, 100), new Rectangle(200, 200, 100, 100), out pa, out pb);
-            Check(pa.X >= 0 && pa.X <= 99 && pa.Y >= 0 && pa.Y <= 99, "edge diagonal A inside");
-            Check(pb.X >= 200 && pb.X <= 299 && pb.Y >= 200 && pb.Y <= 299, "edge diagonal B inside");
-            Check(pa.X == 99 && pa.Y == 99, "edge diagonal A corner");
-
-            GeometryUtil.GetEdgePoints(new Rectangle(0, 0, 100, 100), new Rectangle(50, 50, 100, 100), out pa, out pb);
-            Check(pa.X >= 0 && pa.X < 100 && pa.Y >= 0 && pa.Y < 100, "edge overlap A clamped");
-            Check(pb.X >= 50 && pb.X < 150 && pb.Y >= 50 && pb.Y < 150, "edge overlap B clamped");
-
-            GeometryUtil.GetEdgePoints(new Rectangle(0, 0, 100, 100), new Rectangle(0, 0, 100, 100), out pa, out pb);
-            Check(pa.X >= 0 && pa.X < 100, "edge same center no exception");
-
             Check(GeometryUtil.ClampZoom(0.01f) == GeometryUtil.MinZoom, "zoom clamp min");
             Check(GeometryUtil.ClampZoom(100f) == GeometryUtil.MaxZoom, "zoom clamp max");
             Check(GeometryUtil.ClampZoom(float.NaN) == 1f, "zoom clamp NaN");
@@ -192,36 +169,31 @@ namespace ShotPin.Tests
             Check(clamp.Right <= work.Right && clamp.Bottom <= work.Bottom, "clamp to work area");
         }
 
-        private static void TestLinks()
+        private static void TestClothesline()
         {
-            Guid a = Guid.NewGuid();
-            Guid b = Guid.NewGuid();
-            Guid c = Guid.NewGuid();
-            LinkGraph graph = new LinkGraph();
+            Check(ClotheslineLayout.LineYAt(0, 0, 100, 100, 8) == 100, "clothesline y at left");
+            Check(ClotheslineLayout.LineYAt(50, 0, 100, 100, 8) == 108, "clothesline y sag center");
+            Check(ClotheslineLayout.LineYAt(100, 0, 100, 100, 8) == 100, "clothesline y at right");
+            Check(ClotheslineLayout.LineYAt(-10, 0, 100, 100, 8) == 100, "clothesline y clamps left");
 
-            Check(graph.Add(a, b), "link add");
-            Check(!graph.Add(a, b), "link duplicate");
-            Check(!graph.Add(b, a), "link duplicate reversed");
-            Check(!graph.Add(a, a), "link self rejected");
-            Check(!graph.Add(Guid.Empty, b), "link empty rejected");
-            Check(graph.Count == 1, "link count");
+            Check(ClotheslineLayout.ClampLineY(10, 40, 200) == 40, "line y clamp min");
+            Check(ClotheslineLayout.ClampLineY(300, 40, 200) == 200, "line y clamp max");
+            Check(ClotheslineLayout.ClampLineY(120, 40, 200) == 120, "line y clamp middle");
 
-            Check(graph.Add(b, c), "link second");
-            Check(graph.HasLinks(a), "link has links");
-            Check(!graph.HasLinks(Guid.NewGuid()), "link no links");
+            List<Rectangle> existing = new List<Rectangle>();
+            Check(ClotheslineLayout.PlaceOnLine(120, 80, 0, 1000, existing, 8) == 120,
+                "place on empty line");
 
-            IList<Guid> neighbors = graph.Neighbors(b);
-            Check(neighbors.Count == 2 && neighbors.Contains(a) && neighbors.Contains(c), "link neighbors");
+            existing.Add(new Rectangle(100, 0, 100, 100));
+            Check(ClotheslineLayout.PlaceOnLine(120, 80, 0, 1000, existing, 8) == 208,
+                "place on line avoids overlap");
 
-            Check(graph.Remove(a, b), "link remove pair");
-            Check(!graph.Remove(a, b), "link remove missing");
-            Check(graph.RemoveAll(b) == 1, "link remove all");
-            Check(graph.Count == 0, "link empty after remove all");
+            existing.Add(new Rectangle(400, 0, 100, 100));
+            int placed = ClotheslineLayout.PlaceOnLine(380, 80, 0, 1000, existing, 8);
+            Check(placed == 312, "place on line uses nearest free gap");
 
-            graph.Add(a, b);
-            graph.Add(b, c);
-            graph.Clear();
-            Check(graph.Count == 0, "link clear");
+            Check(ClotheslineLayout.NearLine(200, 190, 15), "near line within threshold");
+            Check(!ClotheslineLayout.NearLine(200, 190, 5), "near line outside threshold");
         }
     }
 }

@@ -1,0 +1,32 @@
+# 构建中间产物
+/build/
+
+# 运行时日志、诊断和写入探针
+/dist/logs/
+/dist/diag.txt
+.shotpin_write_test
+*.log
+*.tmp
+
+# 临时测试截图
+/smoke_*.png
+*.bak
+
+# Python 临时分析脚本缓存
+__pycache__/
+*.pyc
+
+# IDE / 系统文件
+.vs/
+.idea/
+*.user
+*.suo
+Thumbs.db
+Desktop.ini
+
+# 说明：
+# dist/settings.ini 是便携配置，随 exe 放在项目里，需要提交。
+# dist/ShotPin.exe 和 dist/ShotPin.exe.config 目前也在仓库中；如果不想提交二进制，
+# 可执行 git rm --cached dist/ShotPin.exe dist/ShotPin.exe.config 后再取消下面的注释。
+/dist/ShotPin.exe
+/dist/ShotPin.exe.config

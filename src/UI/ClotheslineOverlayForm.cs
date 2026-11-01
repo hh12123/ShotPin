@@ -6,26 +6,28 @@ using System.Drawing.Imaging;
 using System.Runtime.InteropServices;
 using System.Windows.Forms;
 using ShotPin.App;
+using ShotPin.Core;
 
 namespace ShotPin.UI
 {
-    internal sealed class ConnectorLine
+    internal sealed class HangerInfo
     {
-        public readonly Point A;
-        public readonly Point B;
+        public readonly int X;
+        public readonly int LineY;
+        public readonly int PinTop;
 
-        public ConnectorLine(Point a, Point b)
+        public HangerInfo(int x, int lineY, int pinTop)
         {
-            A = a;
-            B = b;
+            X = x;
+            LineY = lineY;
+            PinTop = pinTop;
         }
     }
 
     /// <summary>
-    /// 覆盖整个虚拟桌面、鼠标穿透、逐像素透明的连线层。
-    /// 用 GDI+ 画到 32bppPArgb 位图，再复制到 DIB 交给 UpdateLayeredWindow。
+    /// 覆盖整个虚拟桌面的装饰挂线层：鼠标穿透、逐像素透明，画绳线、夹子和挂绳。
     /// </summary>
-    internal sealed class ConnectorOverlayForm : Form
+    internal sealed class ClotheslineOverlayForm : Form
     {
         private Bitmap _canvas;
         private Size _canvasSize;
@@ -34,13 +36,15 @@ namespace ShotPin.UI
         private IntPtr _oldObject = IntPtr.Zero;
         private IntPtr _bits = IntPtr.Zero;
 
-        private List<ConnectorLine> _lines = new List<ConnectorLine>();
+        private List<HangerInfo> _hangers = new List<HangerInfo>();
         private List<Rectangle> _excludes = new List<Rectangle>();
-        private Color _color = Theme.Accent;
+        private int _lineY;
+        private int _sag = 8;
+        private Color _color = Color.FromArgb(201, 185, 154);
         private int _lineWidth = 2;
         private bool _layerFailed;
 
-        public ConnectorOverlayForm()
+        public ClotheslineOverlayForm()
         {
             FormBorderStyle = FormBorderStyle.None;
             ShowInTaskbar = false;
@@ -49,9 +53,9 @@ namespace ShotPin.UI
             AutoScaleMode = AutoScaleMode.None;
             BackColor = Color.Black;
             Bounds = SystemInformation.VirtualScreen;
-            Text = "ShotPin 连线层";
+            Text = "ShotPin 挂线层";
             SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.Opaque, true);
-            IntPtr handle = Handle; // 提前创建句柄，便于注册分层属性
+            IntPtr handle = Handle;
             GC.KeepAlive(handle);
         }
 
@@ -68,7 +72,6 @@ namespace ShotPin.UI
 
         protected override void OnPaintBackground(PaintEventArgs e)
         {
-            // 分层窗口内容完全由 UpdateLayeredWindow 提供。
         }
 
         protected override void OnPaint(PaintEventArgs e)
@@ -86,17 +89,13 @@ namespace ShotPin.UI
             }
         }
 
-        public void UpdateStyle(Color color, int width)
-        {
-            _color = color;
-            _lineWidth = Math.Max(1, Math.Min(8, width));
-            if (_lines.Count > 0)
-            {
-                Render();
-            }
-        }
-
-        public void UpdateScene(IList<Rectangle> excludes, IList<ConnectorLine> lines)
+        public void UpdateScene(
+            IList<Rectangle> excludes,
+            IList<HangerInfo> hangers,
+            int lineY,
+            int sag,
+            Color color,
+            int lineWidth)
         {
             _excludes = new List<Rectangle>();
             if (excludes != null)
@@ -106,32 +105,21 @@ namespace ShotPin.UI
                     _excludes.Add(excludes[i]);
                 }
             }
-            _lines = new List<ConnectorLine>();
-            if (lines != null)
+            _hangers = new List<HangerInfo>();
+            if (hangers != null)
             {
-                for (int i = 0; i < lines.Count; i++)
+                for (int i = 0; i < hangers.Count; i++)
                 {
-                    _lines.Add(lines[i]);
+                    _hangers.Add(hangers[i]);
                 }
             }
+            _lineY = lineY;
+            _sag = Math.Max(0, sag);
+            _color = color;
+            _lineWidth = Math.Max(1, Math.Min(8, lineWidth));
 
             EnsureResources();
             Render();
-
-            if (_lines.Count > 0)
-            {
-                if (!Visible)
-                {
-                    Show();
-                }
-            }
-            else
-            {
-                if (Visible)
-                {
-                    Hide();
-                }
-            }
         }
 
         private void EnsureResources()
@@ -227,38 +215,124 @@ namespace ShotPin.UI
                     }
                 }
 
-                int width = Math.Max(1, _lineWidth);
-                int haloWidth = Math.Max(width + 2, 4);
-                using (Pen halo = new Pen(Color.FromArgb(105, 255, 255, 255), haloWidth))
-                using (Pen core = new Pen(Color.FromArgb(235, _color), width))
-                using (SolidBrush dot = new SolidBrush(Color.FromArgb(240, _color)))
-                {
-                    halo.StartCap = LineCap.Round;
-                    halo.EndCap = LineCap.Round;
-                    core.StartCap = LineCap.Round;
-                    core.EndCap = LineCap.Round;
-
-                    for (int i = 0; i < _lines.Count; i++)
-                    {
-                        Point a = LocalPoint(_lines[i].A);
-                        Point b = LocalPoint(_lines[i].B);
-                        graphics.DrawLine(halo, a, b);
-                        graphics.DrawLine(core, a, b);
-                    }
-
-                    int radius = Math.Max(2, width + 1);
-                    for (int i = 0; i < _lines.Count; i++)
-                    {
-                        Point a = LocalPoint(_lines[i].A);
-                        Point b = LocalPoint(_lines[i].B);
-                        graphics.FillEllipse(dot, a.X - radius, a.Y - radius, radius * 2, radius * 2);
-                        graphics.FillEllipse(dot, b.X - radius, b.Y - radius, radius * 2, radius * 2);
-                    }
-                }
+                DrawRope(graphics);
+                DrawHangers(graphics);
                 graphics.ResetClip();
             }
 
             ApplyLayer();
+        }
+
+        private void DrawRope(Graphics graphics)
+        {
+            int width = Width;
+            int height = Height;
+            if (width <= 1 || height <= 1)
+            {
+                return;
+            }
+
+            int step = 8;
+            List<PointF> points = new List<PointF>();
+            for (int x = 0; x <= width; x += step)
+            {
+                int screenX = Bounds.Left + x;
+                int lineScreenY = ClotheslineLayout.LineYAt(
+                    screenX, Bounds.Left, Bounds.Right, _lineY, _sag);
+                points.Add(new PointF(x, lineScreenY - Bounds.Top));
+            }
+            PointF last = new PointF(width - 1,
+                ClotheslineLayout.LineYAt(Bounds.Right - 1, Bounds.Left, Bounds.Right, _lineY, _sag) - Bounds.Top);
+            if (points.Count == 0 || points[points.Count - 1].X < last.X)
+            {
+                points.Add(last);
+            }
+
+            if (points.Count < 2)
+            {
+                return;
+            }
+
+            using (Pen shadow = new Pen(Color.FromArgb(85, 0, 0, 0), _lineWidth + 2))
+            using (Pen core = new Pen(Color.FromArgb(215, _color), _lineWidth))
+            using (Pen shine = new Pen(Color.FromArgb(85, 255, 255, 255), 1))
+            {
+                shadow.LineJoin = LineJoin.Round;
+                shadow.StartCap = LineCap.Round;
+                shadow.EndCap = LineCap.Round;
+                core.LineJoin = LineJoin.Round;
+                core.StartCap = LineCap.Round;
+                core.EndCap = LineCap.Round;
+                shine.StartCap = LineCap.Round;
+                shine.EndCap = LineCap.Round;
+
+                graphics.DrawLines(shadow, points.ToArray());
+                graphics.DrawLines(core, points.ToArray());
+                graphics.DrawLines(shine, points.ToArray());
+            }
+
+            DrawKnot(graphics, points[0]);
+            DrawKnot(graphics, points[points.Count - 1]);
+        }
+
+        private void DrawKnot(Graphics graphics, PointF point)
+        {
+            int radius = Math.Max(3, _lineWidth + 2);
+            using (SolidBrush shadow = new SolidBrush(Color.FromArgb(110, 0, 0, 0)))
+            using (SolidBrush fill = new SolidBrush(Color.FromArgb(235, _color)))
+            {
+                graphics.FillEllipse(shadow, point.X - radius - 1, point.Y - radius + 1,
+                    radius * 2 + 2, radius * 2 + 2);
+                graphics.FillEllipse(fill, point.X - radius, point.Y - radius,
+                    radius * 2, radius * 2);
+            }
+        }
+
+        private void DrawHangers(Graphics graphics)
+        {
+            if (_hangers.Count == 0)
+            {
+                return;
+            }
+
+            using (Pen stringPen = new Pen(Color.FromArgb(160, _color), 1.4f))
+            using (Pen stringShadow = new Pen(Color.FromArgb(85, 0, 0, 0), 3.0f))
+            using (Pen clipShadow = new Pen(Color.FromArgb(120, 0, 0, 0), 4.0f))
+            using (Pen clipPen = new Pen(Color.FromArgb(235, _color), 2.2f))
+            using (SolidBrush ring = new SolidBrush(Color.FromArgb(200, _color)))
+            {
+                stringPen.StartCap = LineCap.Round;
+                stringPen.EndCap = LineCap.Round;
+                stringShadow.StartCap = LineCap.Round;
+                stringShadow.EndCap = LineCap.Round;
+                clipPen.StartCap = LineCap.Round;
+                clipPen.EndCap = LineCap.Round;
+
+                for (int i = 0; i < _hangers.Count; i++)
+                {
+                    HangerInfo hanger = _hangers[i];
+                    int x = hanger.X - Bounds.Left;
+                    int lineY = hanger.LineY - Bounds.Top;
+                    int pinTop = hanger.PinTop - Bounds.Top;
+                    if (x < 0 || x >= Width || pinTop <= lineY)
+                    {
+                        continue;
+                    }
+
+                    graphics.DrawLine(stringShadow, x, lineY + 8, x, pinTop);
+                    graphics.DrawLine(stringPen, x, lineY + 8, x, pinTop);
+
+                    // 深色底衬让夹子在浅色桌面上也看得清。
+                    graphics.DrawLine(clipShadow, x - 3, lineY - 2, x - 3, lineY + 10);
+                    graphics.DrawLine(clipShadow, x + 3, lineY - 2, x + 3, lineY + 10);
+                    graphics.DrawLine(clipPen, x - 3, lineY - 2, x - 3, lineY + 10);
+                    graphics.DrawLine(clipPen, x + 3, lineY - 2, x + 3, lineY + 10);
+                    graphics.DrawLine(clipPen, x - 3, lineY + 1, x + 3, lineY + 1);
+
+                    int radius = 2;
+                    graphics.FillEllipse(ring, x - radius, pinTop - radius, radius * 2, radius * 2);
+                }
+            }
         }
 
         private Rectangle LocalRect(Rectangle screenRect)
@@ -268,11 +342,6 @@ namespace ShotPin.UI
                 screenRect.Top - Bounds.Top,
                 screenRect.Width,
                 screenRect.Height);
-        }
-
-        private Point LocalPoint(Point screenPoint)
-        {
-            return new Point(screenPoint.X - Bounds.Left, screenPoint.Y - Bounds.Top);
         }
 
         private void ApplyLayer()
@@ -299,7 +368,7 @@ namespace ShotPin.UI
             }
             catch (Exception ex)
             {
-                Log.Error("connector layer copy failed", ex);
+                Log.Error("clothesline layer copy failed", ex);
                 return;
             }
             finally
@@ -335,7 +404,7 @@ namespace ShotPin.UI
                 if (!ok && !_layerFailed)
                 {
                     _layerFailed = true;
-                    Log.Warn("UpdateLayeredWindow failed: " + Marshal.GetLastWin32Error());
+                    Log.Warn("clothesline UpdateLayeredWindow failed: " + Marshal.GetLastWin32Error());
                 }
             }
             finally

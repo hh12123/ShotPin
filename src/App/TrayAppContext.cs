@@ -18,7 +18,7 @@ namespace ShotPin.App
         private readonly SettingsStore _settingsStore;
         private readonly HotkeyManager _hotkeys;
         private readonly PinManager _pins;
-        private readonly ConnectorManager _connectors;
+        private readonly ClotheslineManager _clothesline;
 
         private NotifyIcon _tray;
         private Icon _trayIcon;
@@ -45,8 +45,9 @@ namespace ShotPin.App
 
             _hotkeys = new HotkeyManager();
             _pins = new PinManager(this);
-            _connectors = new ConnectorManager(this, _pins, _hotkeys);
-            _pins.Connectors = _connectors;
+            _clothesline = new ClotheslineManager(this, _pins);
+            _pins.Clothesline = _clothesline;
+            _clothesline.LineMoved += OnClotheslineMoved;
 
             BuildTray();
 
@@ -73,6 +74,14 @@ namespace ShotPin.App
             }
 
             SystemEvents.DisplaySettingsChanged += OnDisplaySettingsChanged;
+            try
+            {
+                _clothesline.Show();
+            }
+            catch (Exception ex)
+            {
+                Log.Error("show clothesline failed", ex);
+            }
             Log.Info("tray ready");
         }
 
@@ -372,7 +381,7 @@ namespace ShotPin.App
 
             _hotkeys.UnregisterAll();
             List<string> failures = RegisterHotkeys();
-            _connectors.UpdateStyle(settings.LinkColor, settings.LinkWidth);
+            _clothesline.ApplySettings(settings);
 
             List<string> messages = new List<string>();
             for (int i = 0; i < settings.Warnings.Count; i++)
@@ -457,9 +466,18 @@ namespace ShotPin.App
                           "当前屏幕截图：" + Settings.FullscreenHotkey.Text + "\n" +
                           "显示/隐藏所有图片：" + Settings.ToggleBoardHotkey.Text + "\n" +
                           "关闭所有图片：" + Settings.CloseAllHotkey.Text + "\n\n" +
+                          "拖动挂线最左端的小绳结可上下调整挂线高度。\n\n" +
                           "配置文件：" + _settingsStore.FilePath + "\n" +
                           "日志目录：" + Log.LogDir;
             MessageBox.Show(text, "ShotPin", MessageBoxButtons.OK, MessageBoxIcon.Information);
+        }
+
+        private void OnClotheslineMoved(object sender, EventArgs e)
+        {
+            if (_settingsStore != null && _clothesline != null)
+            {
+                _settingsStore.SaveLineYPercent(_clothesline.LinePercent);
+            }
         }
 
         private void OnDisplaySettingsChanged(object sender, EventArgs e)
@@ -467,12 +485,15 @@ namespace ShotPin.App
             try
             {
                 Rectangle screen = SystemInformation.VirtualScreen;
+                _clothesline.Relayout();
                 IList<PinForm> pins = _pins.AllPins;
                 for (int i = 0; i < pins.Count; i++)
                 {
-                    pins[i].Bounds = GeometryUtil.KeepReachable(pins[i].Bounds, screen, 40);
+                    if (!pins[i].IsHung)
+                    {
+                        pins[i].Bounds = GeometryUtil.KeepReachable(pins[i].Bounds, screen, 40);
+                    }
                 }
-                _connectors.Relayout();
             }
             catch (Exception ex)
             {
@@ -512,11 +533,12 @@ namespace ShotPin.App
 
             try
             {
-                _connectors.Dispose();
+                _clothesline.LineMoved -= OnClotheslineMoved;
+                _clothesline.Dispose();
             }
             catch (Exception ex)
             {
-                Log.Error("dispose connectors failed", ex);
+                Log.Error("dispose clothesline failed", ex);
             }
             try
             {
