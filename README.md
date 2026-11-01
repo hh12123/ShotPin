@@ -73,7 +73,7 @@ close_all=Ctrl+Alt+Shift+Q
 
 - `auto_copy=1`：截图后复制到剪贴板。
 - `auto_save=0`：不自动保存；改为 `1` 后，每张截图确认时自动保存 PNG 到 `save_dir`。
-- `save_dir`：截图保存目录，默认项目内 `pictures`；该目录已被 `.gitignore` 忽略。
+- `save_dir`：截图保存目录，默认 `..\pictures`，相对路径按 exe 所在目录解析；在当前仓库中指向项目根目录的 `pictures`，该目录已被 `.gitignore` 忽略。
 - `line_y_percent`：挂线高度百分比（5–60），拖动绳结会自动更新。
 - `line_color` / `line_width`：挂线颜色和粗细（1–6 像素）。
 - 修改配置后托盘菜单 →“重新加载设置”，无需重启。

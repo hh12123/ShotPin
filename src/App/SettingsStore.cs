@@ -78,7 +78,8 @@ namespace ShotPin.App
             }
             if (!Path.IsPathRooted(saveDir))
             {
-                saveDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyPictures), saveDir);
+                // 相对路径按 exe 同目录解析，便于配置文件跨机器复用。
+                saveDir = Path.GetFullPath(Path.Combine(Log.DataDir, saveDir));
             }
             settings.SaveDir = saveDir;
 
@@ -214,7 +215,7 @@ namespace ShotPin.App
             sb.AppendLine("auto_copy=1");
             sb.AppendLine("; 截图后自动保存 PNG 到 save_dir");
             sb.AppendLine("auto_save=0");
-            sb.AppendLine("save_dir=" + DefaultSaveDir());
+            sb.AppendLine("save_dir=..\\pictures");
             sb.AppendLine("; 桌面装饰挂线：高度百分比（5-60）、颜色、粗细（1-6）");
             sb.AppendLine("; 也可以运行时拖动挂线最左端的小绳结调整高度");
             sb.AppendLine("line_y_percent=9");
