@@ -12,7 +12,7 @@ namespace ShotPin.App
         public bool AutoCopy = true;
         public bool AutoSave = false;
         public string SaveDir = string.Empty;
-        public int LineYPercent = 12;
+        public int LineYPercent = 9;
         public Color LineColor = Color.FromArgb(201, 185, 154);
         public int LineWidth = 2;
         public HotkeySpec RegionHotkey;
@@ -64,7 +64,7 @@ namespace ShotPin.App
 
             settings.AutoCopy = ini.GetBool("general", "auto_copy", true);
             settings.AutoSave = ini.GetBool("general", "auto_save", false);
-            settings.LineYPercent = ini.GetInt("general", "line_y_percent", 12, 5, 60);
+            settings.LineYPercent = ini.GetInt("general", "line_y_percent", 9, 5, 60);
             settings.LineWidth = ini.GetInt("general", "line_width", 2, 1, 6);
 
             string colorText = ini.Get("general", "line_color", "#C9B99A");
@@ -92,12 +92,13 @@ namespace ShotPin.App
 
         public static string DefaultSaveDir()
         {
-            string pictures = Environment.GetFolderPath(Environment.SpecialFolder.MyPictures);
-            if (string.IsNullOrEmpty(pictures))
+            // 默认放在 exe 上一级目录的 pictures 中，和当前项目配置一致。
+            string parent = Path.GetDirectoryName(Log.DataDir);
+            if (string.IsNullOrEmpty(parent))
             {
-                return Path.Combine(Log.DataDir, "shots");
+                return Path.Combine(Log.DataDir, "pictures");
             }
-            return Path.Combine(pictures, "ShotPin");
+            return Path.Combine(parent, "pictures");
         }
 
         /// <summary>
@@ -213,10 +214,10 @@ namespace ShotPin.App
             sb.AppendLine("auto_copy=1");
             sb.AppendLine("; 截图后自动保存 PNG 到 save_dir");
             sb.AppendLine("auto_save=0");
-            sb.AppendLine("save_dir=%USERPROFILE%\\Pictures\\ShotPin");
+            sb.AppendLine("save_dir=" + DefaultSaveDir());
             sb.AppendLine("; 桌面装饰挂线：高度百分比（5-60）、颜色、粗细（1-6）");
             sb.AppendLine("; 也可以运行时拖动挂线最左端的小绳结调整高度");
-            sb.AppendLine("line_y_percent=12");
+            sb.AppendLine("line_y_percent=9");
             sb.AppendLine("line_color=#C9B99A");
             sb.AppendLine("line_width=2");
             sb.AppendLine();
