@@ -61,6 +61,7 @@ namespace ShotPin.UI
             public Point Start;
             public Point End;
             public string Text;
+            public List<string> Lines;
 
             public void Draw(Graphics graphics, Font textFont, int strokeWidth)
             {
@@ -104,18 +105,43 @@ namespace ShotPin.UI
                 {
                     return;
                 }
-                string normalized = Text.Replace("\r\n", "\n").Replace('\r', '\n');
-                string[] lines = normalized.Split('\n');
-                float lineHeight = textFont.GetHeight(graphics) + 2.0f;
+                int width = Math.Abs(End.X - Start.X);
+                int height = Math.Abs(End.Y - Start.Y);
+                if (width <= 0 || height <= 0)
+                {
+                    return;
+                }
+                Rectangle box = new Rectangle(Math.Min(Start.X, End.X), Math.Min(Start.Y, End.Y), width, height);
+                List<string> lines = Lines;
+                if (lines == null || lines.Count == 0)
+                {
+                    string normalized = Text.Replace("\r\n", "\n").Replace('\r', '\n');
+                    lines = new List<string>(normalized.Split('\n'));
+                }
+                float lineHeight = Math.Max(1, textFont.Height);
+                using (StringFormat format = new StringFormat(StringFormatFlags.NoWrap))
                 using (SolidBrush shadow = new SolidBrush(Color.FromArgb(170, 0, 0, 0)))
                 using (SolidBrush brush = new SolidBrush(Color))
                 {
-                    for (int i = 0; i < lines.Length; i++)
+                    GraphicsState state = graphics.Save();
+                    try
                     {
-                        float y = Start.Y + i * lineHeight;
-                        // 先画深色阴影，保证浅色截图上文字也清楚。
-                        graphics.DrawString(lines[i], textFont, shadow, Start.X + 1.5f, y + 1.5f);
-                        graphics.DrawString(lines[i], textFont, brush, Start.X, y);
+                        graphics.SetClip(box, CombineMode.Intersect);
+                        for (int i = 0; i < lines.Count; i++)
+                        {
+                            float y = box.Y + i * lineHeight;
+                            if (y >= box.Bottom)
+                            {
+                                break;
+                            }
+                            // 内联文本框已经按显示宽度换好行，这里逐行绘制，避免最终换行位置不同。
+                            graphics.DrawString(lines[i], textFont, shadow, box.X + 1.5f, y + 1.5f, format);
+                            graphics.DrawString(lines[i], textFont, brush, box.X, y, format);
+                        }
+                    }
+                    finally
+                    {
+                        graphics.Restore(state);
                     }
                 }
             }
@@ -171,6 +197,14 @@ namespace ShotPin.UI
         private Point _drawCurrentLocal;
         private int _hoverToolbarIndex = -1;
         private Font _textFont;
+
+        private TextBox _textBox;
+        private Rectangle _textEditorRect;
+        private Color _textEditorColor;
+        private bool _editingText;
+        private bool _textResizing;
+        private Point _textResizeStart;
+        private Size _textResizeStartSize;
 
         public Rectangle SelectedScreenRect { get; private set; }
         public Bitmap ResultBitmap { get; private set; }
@@ -261,6 +295,8 @@ namespace ShotPin.UI
                     DrawConfirmButton(graphics);
                 }
             }
+
+            DrawInlineTextEditor(graphics);
 
             DrawToolbar(graphics);
             DrawHint(graphics);
@@ -644,12 +680,204 @@ namespace ShotPin.UI
             Invalidate();
         }
 
+        private Rectangle GetTextResizeGripRect()
+        {
+            if (!_editingText)
+            {
+                return Rectangle.Empty;
+            }
+            int size = Scale(12);
+            return new Rectangle(_textEditorRect.Right - size, _textEditorRect.Bottom - size, size, size);
+        }
+
+        private void DrawInlineTextEditor(Graphics graphics)
+        {
+            if (!_editingText)
+            {
+                return;
+            }
+            using (Pen border = new Pen(_textEditorColor, 1.5f))
+            {
+                graphics.DrawRectangle(border, _textEditorRect.Left, _textEditorRect.Top,
+                    Math.Max(0, _textEditorRect.Width - 1), Math.Max(0, _textEditorRect.Height - 1));
+            }
+            Rectangle grip = GetTextResizeGripRect();
+            if (grip.Width > 0 && grip.Height > 0)
+            {
+                using (SolidBrush fill = new SolidBrush(Color.FromArgb(235, _textEditorColor)))
+                using (Pen line = new Pen(Color.White, 1.2f))
+                {
+                    graphics.FillRectangle(fill, grip);
+                    int inset = Scale(3);
+                    graphics.DrawLine(line, grip.Right - inset, grip.Bottom - Scale(9),
+                        grip.Right - Scale(9), grip.Bottom - inset);
+                    graphics.DrawLine(line, grip.Right - inset, grip.Bottom - Scale(6),
+                        grip.Right - Scale(6), grip.Bottom - inset);
+                }
+            }
+        }
+
+        private void UpdateInlineTextBounds()
+        {
+            if (_textBox == null)
+            {
+                return;
+            }
+            int pad = Scale(12);
+            int width = Math.Max(1, _textEditorRect.Width - pad * 2);
+            int height = Math.Max(1, _textEditorRect.Height - pad * 2);
+            _textBox.Bounds = new Rectangle(_textEditorRect.Left + pad, _textEditorRect.Top + pad, width, height);
+        }
+
+        private void BeginInlineText(Point screenPoint)
+        {
+            CommitInlineText();
+            Rectangle selection = GetLocalSelection();
+            if (selection.Width < 3 || selection.Height < 3 || !selection.Contains(screenPoint))
+            {
+                return;
+            }
+
+            Point local = ToLocal(screenPoint);
+            int width = Math.Min(Scale(280), selection.Width);
+            int height = Math.Min(Scale(110), selection.Height);
+            int x = Math.Max(0, Math.Min(local.X, selection.Width - width));
+            int y = Math.Max(0, Math.Min(local.Y, selection.Height - height));
+
+            _textEditorRect = new Rectangle(selection.Left + x, selection.Top + y, width, height);
+            _textEditorColor = _annotationColor;
+            TextBox box = new TextBox();
+            box.Multiline = true;
+            box.WordWrap = true;
+            box.AcceptsReturn = true;
+            box.ScrollBars = ScrollBars.Vertical;
+            box.BorderStyle = BorderStyle.None;
+            box.BackColor = Color.White;
+            box.ForeColor = _textEditorColor;
+            box.Font = GetTextFont();
+            _textBox = box;
+            Controls.Add(box);
+            _editingText = true;
+            UpdateInlineTextBounds();
+            box.BringToFront();
+            box.Focus();
+            Invalidate();
+        }
+
+        private void BeginTextResize(Point point)
+        {
+            if (!_editingText || _textBox == null)
+            {
+                return;
+            }
+            _textResizing = true;
+            _textResizeStart = point;
+            _textResizeStartSize = _textEditorRect.Size;
+            Capture = true;
+        }
+
+        private void ResizeInlineText(Point point)
+        {
+            if (!_textResizing || _textBox == null)
+            {
+                return;
+            }
+            Rectangle selection = GetLocalSelection();
+            int width = _textResizeStartSize.Width + (point.X - _textResizeStart.X);
+            int height = _textResizeStartSize.Height + (point.Y - _textResizeStart.Y);
+            int maxWidth = Math.Max(1, selection.Right - _textEditorRect.Left);
+            int maxHeight = Math.Max(1, selection.Bottom - _textEditorRect.Top);
+            width = Math.Min(maxWidth, Math.Max(Scale(80), width));
+            height = Math.Min(maxHeight, Math.Max(Scale(40), height));
+            _textEditorRect = new Rectangle(_textEditorRect.Left, _textEditorRect.Top, width, height);
+            UpdateInlineTextBounds();
+            Invalidate();
+        }
+
+        private static List<string> ReadDisplayLines(TextBox box)
+        {
+            List<string> lines = new List<string>();
+            if (box == null || box.TextLength == 0)
+            {
+                return lines;
+            }
+            int lineCount = box.GetLineFromCharIndex(box.TextLength) + 1;
+            for (int i = 0; i < lineCount; i++)
+            {
+                int start = box.GetFirstCharIndexFromLine(i);
+                if (start < 0 || start > box.TextLength)
+                {
+                    break;
+                }
+                int end = (i + 1 < lineCount) ? box.GetFirstCharIndexFromLine(i + 1) : box.TextLength;
+                if (end < start || end > box.TextLength)
+                {
+                    end = box.TextLength;
+                }
+                string line = box.Text.Substring(start, end - start);
+                lines.Add(line.TrimEnd('\r', '\n'));
+            }
+            return lines;
+        }
+
+        private void CommitInlineText()
+        {            if (!_editingText || _textBox == null)
+            {
+                return;
+            }
+            string text = _textBox.Text;
+            if (!string.IsNullOrEmpty(text) && text.Trim().Length > 0)
+            {
+                Rectangle selection = GetLocalSelection();
+                Rectangle content = _textBox.Bounds;
+                Annotation annotation = new Annotation();
+                annotation.Kind = ToolMode.Text;
+                annotation.Color = _textEditorColor;
+                annotation.Start = new Point(content.Left - selection.Left, content.Top - selection.Top);
+                annotation.End = new Point(content.Right - selection.Left, content.Bottom - selection.Top);
+                annotation.Text = text;
+                annotation.Lines = ReadDisplayLines(_textBox);
+                _annotations.Add(annotation);
+            }
+            TextBox box = _textBox;
+            _textBox = null;
+            _editingText = false;
+            _textResizing = false;
+            Controls.Remove(box);
+            box.Dispose();
+            Invalidate();
+        }
+
+        private void CancelInlineText()
+        {
+            if (_textBox == null)
+            {
+                _editingText = false;
+                _textResizing = false;
+                return;
+            }
+            TextBox box = _textBox;
+            _textBox = null;
+            _editingText = false;
+            _textResizing = false;
+            Controls.Remove(box);
+            box.Dispose();
+            Invalidate();
+        }
+
         private void DrawHint(Graphics graphics)
         {
             string hint;
             Font font;
             int y;
-            if (!_hasSelection)
+            if (_editingText)
+            {
+                hint = "输入文字 · 拖右下角调整文本框 · 点击框外或 Ctrl+Enter 完成 · Esc 取消";
+                font = Theme.SmallFont;
+                Rectangle toolbarPanel = GetToolbarPanel();
+                y = (toolbarPanel == Rectangle.Empty ? Scale(22) : toolbarPanel.Bottom + Scale(2));
+            }
+            else if (!_hasSelection)
             {
                 hint = "拖动鼠标选择区域 · Esc 取消";
                 font = Theme.UiFont;
@@ -836,6 +1064,11 @@ namespace ShotPin.UI
             base.OnMouseDown(e);
             if (e.Button == MouseButtons.Right)
             {
+                if (_editingText)
+                {
+                    CancelInlineText();
+                    return;
+                }
                 CancelSelection();
                 return;
             }
@@ -845,6 +1078,33 @@ namespace ShotPin.UI
             }
 
             _anchor = e.Location;
+
+            if (_editingText)
+            {
+                Rectangle grip = GetTextResizeGripRect();
+                if (grip.Contains(e.Location))
+                {
+                    BeginTextResize(e.Location);
+                    return;
+                }
+                if (_textEditorRect.Contains(e.Location))
+                {
+                    if (_textBox != null && !_textBox.Bounds.Contains(e.Location))
+                    {
+                        _textBox.Focus();
+                    }
+                    return;
+                }
+                CommitInlineText();
+                int actionIndex = HitToolbar(e.Location);
+                Rectangle actionConfirm = GetConfirmButtonRect();
+                bool onAction = actionIndex >= 0 ||
+                                (actionConfirm != Rectangle.Empty && actionConfirm.Contains(e.Location));
+                if (!onAction)
+                {
+                    return;
+                }
+            }
 
             int toolbarIndex = HitToolbar(e.Location);
             if (toolbarIndex >= 0)
@@ -898,7 +1158,7 @@ namespace ShotPin.UI
                     {
                         if (_tool == ToolMode.Text)
                         {
-                            AddTextAt(e.Location);
+                            BeginInlineText(e.Location);
                             return;
                         }
                         _drawing = true;
@@ -932,6 +1192,27 @@ namespace ShotPin.UI
             base.OnMouseMove(e);
             if (_pressedConfirm)
             {
+                return;
+            }
+            if (_textResizing)
+            {
+                ResizeInlineText(e.Location);
+                return;
+            }
+            if (_editingText)
+            {
+                if (GetTextResizeGripRect().Contains(e.Location))
+                {
+                    Cursor = Cursors.SizeNWSE;
+                }
+                else if (_textEditorRect.Contains(e.Location))
+                {
+                    Cursor = Cursors.IBeam;
+                }
+                else
+                {
+                    Cursor = Cursors.Cross;
+                }
                 return;
             }
             if (_drawing)
@@ -1028,6 +1309,13 @@ namespace ShotPin.UI
         protected override void OnMouseUp(MouseEventArgs e)
         {
             base.OnMouseUp(e);
+            if (_textResizing)
+            {
+                _textResizing = false;
+                Capture = false;
+                Invalidate();
+                return;
+            }
             if (_pressedConfirm)
             {
                 _pressedConfirm = false;
@@ -1087,6 +1375,21 @@ namespace ShotPin.UI
 
         protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
         {
+            if (_editingText)
+            {
+                if (keyData == Keys.Escape)
+                {
+                    CancelInlineText();
+                    return true;
+                }
+                if ((keyData & Keys.KeyCode) == Keys.Enter && (keyData & Keys.Control) == Keys.Control)
+                {
+                    CommitInlineText();
+                    return true;
+                }
+                // 其余按键交给内联文本框（换行、光标、撤销、输入法）。
+                return false;
+            }
             if (keyData == Keys.Escape)
             {
                 if (_drawing)
@@ -1203,38 +1506,9 @@ namespace ShotPin.UI
             Invalidate();
         }
 
-        private void AddTextAt(Point screenPoint)
-        {
-            Rectangle selection = GetLocalSelection();
-            if (selection.Width <= 0 || selection.Height <= 0 || !selection.Contains(screenPoint))
-            {
-                return;
-            }
-            Point local = ToLocal(screenPoint);
-            using (TextAnnotationDialog dialog = new TextAnnotationDialog())
-            {
-                dialog.TopMost = true;
-                DialogResult result = dialog.ShowDialog(this);
-                Activate();
-                if (result == DialogResult.OK)
-                {
-                    string text = dialog.ResultText;
-                    if (!string.IsNullOrEmpty(text) && text.Trim().Length > 0)
-                    {
-                        Annotation annotation = new Annotation();
-                        annotation.Kind = ToolMode.Text;
-                        annotation.Color = _annotationColor;
-                        annotation.Start = local;
-                        annotation.Text = text;
-                        _annotations.Add(annotation);
-                        Invalidate();
-                    }
-                }
-            }
-        }
-
         private void ConfirmSelection()
         {
+            CommitInlineText();
             FinishDrawing();
             Rectangle local = GetLocalSelection();
             if (local.Width < 3 || local.Height < 3)
@@ -1266,6 +1540,7 @@ namespace ShotPin.UI
 
         private void CancelSelection()
         {
+            CancelInlineText();
             ResultBitmap = null;
             DialogResult = DialogResult.Cancel;
             Close();
@@ -1275,6 +1550,11 @@ namespace ShotPin.UI
         {
             if (disposing)
             {
+                if (_textBox != null)
+                {
+                    _textBox.Dispose();
+                    _textBox = null;
+                }
                 if (_frozen != null)
                 {
                     _frozen.Dispose();
