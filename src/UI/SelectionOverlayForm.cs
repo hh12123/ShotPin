@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Windows.Forms;
@@ -7,7 +8,8 @@ using ShotPin.App;
 namespace ShotPin.UI
 {
     /// <summary>
-    /// 覆盖整个虚拟桌面的选区层：冻结画面、框选、拖动边角微调，确认后才截图。
+    /// 覆盖整个虚拟桌面的选区层：冻结画面、框选、拖动边角微调、标注，确认后才截图。
+    /// 标注坐标以选区左上角为原点，因此选区移动时标注会跟随图片移动。
     /// </summary>
     internal sealed class SelectionOverlayForm : Form
     {
@@ -26,6 +28,108 @@ namespace ShotPin.UI
             ResizeBottomRight
         }
 
+        private enum ToolMode
+        {
+            Adjust,
+            Text,
+            Line,
+            Rectangle,
+            Ellipse
+        }
+
+        private enum ToolbarAction
+        {
+            Tool,
+            Undo,
+            Clear,
+            Color
+        }
+
+        private sealed class ToolbarItem
+        {
+            public Rectangle Bounds;
+            public ToolbarAction Action;
+            public ToolMode Tool;
+            public int ColorIndex;
+            public string Label;
+        }
+
+        private sealed class Annotation
+        {
+            public ToolMode Kind;
+            public Color Color;
+            public Point Start;
+            public Point End;
+            public string Text;
+
+            public void Draw(Graphics graphics, Font textFont, int strokeWidth)
+            {
+                if (Kind == ToolMode.Text)
+                {
+                    DrawText(graphics, textFont);
+                    return;
+                }
+
+                using (Pen pen = new Pen(Color, strokeWidth))
+                {
+                    pen.StartCap = LineCap.Round;
+                    pen.EndCap = LineCap.Round;
+                    pen.LineJoin = LineJoin.Round;
+                    if (Kind == ToolMode.Line)
+                    {
+                        graphics.DrawLine(pen, Start, End);
+                    }
+                    else
+                    {
+                        Rectangle rect = Normalize(Start, End);
+                        if (rect.Width <= 0 || rect.Height <= 0)
+                        {
+                            return;
+                        }
+                        if (Kind == ToolMode.Rectangle)
+                        {
+                            graphics.DrawRectangle(pen, rect);
+                        }
+                        else
+                        {
+                            graphics.DrawEllipse(pen, rect);
+                        }
+                    }
+                }
+            }
+
+            private void DrawText(Graphics graphics, Font textFont)
+            {
+                if (string.IsNullOrEmpty(Text))
+                {
+                    return;
+                }
+                string normalized = Text.Replace("\r\n", "\n").Replace('\r', '\n');
+                string[] lines = normalized.Split('\n');
+                float lineHeight = textFont.GetHeight(graphics) + 2.0f;
+                using (SolidBrush shadow = new SolidBrush(Color.FromArgb(170, 0, 0, 0)))
+                using (SolidBrush brush = new SolidBrush(Color))
+                {
+                    for (int i = 0; i < lines.Length; i++)
+                    {
+                        float y = Start.Y + i * lineHeight;
+                        // 先画深色阴影，保证浅色截图上文字也清楚。
+                        graphics.DrawString(lines[i], textFont, shadow, Start.X + 1.5f, y + 1.5f);
+                        graphics.DrawString(lines[i], textFont, brush, Start.X, y);
+                    }
+                }
+            }
+
+            private static Rectangle Normalize(Point a, Point b)
+            {
+                int left = Math.Min(a.X, b.X);
+                int top = Math.Min(a.Y, b.Y);
+                int right = Math.Max(a.X, b.X);
+                int bottom = Math.Max(a.Y, b.Y);
+                return Rectangle.FromLTRB(left, top, right, bottom);
+            }
+        }
+
         private static readonly DragMode[] HandleModes = new DragMode[]
         {
             DragMode.ResizeTopLeft,
@@ -38,8 +142,18 @@ namespace ShotPin.UI
             DragMode.ResizeBottom
         };
 
+        private static readonly Color[] Palette = new Color[]
+        {
+            Color.FromArgb(255, 59, 48),   // 红
+            Color.FromArgb(255, 149, 0),   // 橙
+            Color.FromArgb(52, 199, 89),   // 绿
+            Color.FromArgb(10, 132, 255),  // 蓝
+            Color.FromArgb(191, 90, 242)   // 紫
+        };
+
         private readonly Bitmap _frozen;
         private readonly Rectangle _virtualScreen;
+        private readonly List<Annotation> _annotations = new List<Annotation>();
 
         private Rectangle _selection;
         private Rectangle _selectionAtDragStart;
@@ -49,6 +163,14 @@ namespace ShotPin.UI
         private bool _hoverConfirm;
         private bool _pressedConfirm;
         private bool _hasSelection;
+
+        private ToolMode _tool = ToolMode.Adjust;
+        private Color _annotationColor = Palette[0];
+        private bool _drawing;
+        private Point _drawStartLocal;
+        private Point _drawCurrentLocal;
+        private int _hoverToolbarIndex = -1;
+        private Font _textFont;
 
         public Rectangle SelectedScreenRect { get; private set; }
         public Bitmap ResultBitmap { get; private set; }
@@ -122,6 +244,8 @@ namespace ShotPin.UI
 
             if (_hasSelection && selection.Width > 0 && selection.Height > 0)
             {
+                RenderAnnotations(graphics, selection.Left, selection.Top, selection.Width, selection.Height, true);
+
                 using (Pen border = new Pen(Theme.Accent, 1.5f))
                 {
                     graphics.DrawRectangle(border, selection.Left, selection.Top,
@@ -130,11 +254,15 @@ namespace ShotPin.UI
                 DrawSizeLabel(graphics, selection);
                 if (_mode != DragMode.Creating)
                 {
-                    DrawHandles(graphics, selection);
+                    if (_tool == ToolMode.Adjust)
+                    {
+                        DrawHandles(graphics, selection);
+                    }
                     DrawConfirmButton(graphics);
                 }
             }
 
+            DrawToolbar(graphics);
             DrawHint(graphics);
         }
 
@@ -144,6 +272,61 @@ namespace ShotPin.UI
             {
                 graphics.FillRectangle(brush, x, y, width, height);
             }
+        }
+
+        private void RenderAnnotations(Graphics graphics, int offsetX, int offsetY, int width, int height, bool includePreview)
+        {
+            if (width <= 0 || height <= 0)
+            {
+                return;
+            }
+            GraphicsState state = graphics.Save();
+            try
+            {
+                graphics.SmoothingMode = SmoothingMode.AntiAlias;
+                graphics.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAlias;
+                graphics.TranslateTransform(offsetX, offsetY);
+                graphics.SetClip(new Rectangle(0, 0, width, height));
+                Font font = GetTextFont();
+                int stroke = GetStrokeWidth();
+                for (int i = 0; i < _annotations.Count; i++)
+                {
+                    _annotations[i].Draw(graphics, font, stroke);
+                }
+                if (includePreview && _drawing)
+                {
+                    Annotation preview = BuildPreview();
+                    if (preview != null)
+                    {
+                        preview.Draw(graphics, font, stroke);
+                    }
+                }
+            }
+            finally
+            {
+                graphics.Restore(state);
+            }
+        }
+
+        private int GetStrokeWidth()
+        {
+            return Math.Max(2, Scale(2));
+        }
+
+        private Font GetTextFont()
+        {
+            if (_textFont == null)
+            {
+                try
+                {
+                    _textFont = new Font("Microsoft YaHei UI", Scale(18), FontStyle.Regular, GraphicsUnit.Pixel);
+                }
+                catch
+                {
+                    _textFont = new Font(FontFamily.GenericSansSerif, Scale(18), FontStyle.Regular, GraphicsUnit.Pixel);
+                }
+            }
+            return _textFont;
         }
 
         private void DrawHandles(Graphics graphics, Rectangle selection)
@@ -245,27 +428,271 @@ namespace ShotPin.UI
             return new Rectangle(x, y, width, height);
         }
 
+        private List<ToolbarItem> GetToolbarItems()
+        {
+            List<ToolbarItem> items = new List<ToolbarItem>();
+            if (!_hasSelection || _mode == DragMode.Creating)
+            {
+                return items;
+            }
+            Rectangle selection = GetLocalSelection();
+            if (selection.Width < 3 || selection.Height < 3)
+            {
+                return items;
+            }
+
+            ToolMode[] tools = new ToolMode[]
+            {
+                ToolMode.Adjust,
+                ToolMode.Text,
+                ToolMode.Line,
+                ToolMode.Rectangle,
+                ToolMode.Ellipse
+            };
+            string[] labels = new string[] { "调整", "文字", "线", "矩形", "椭圆" };
+
+            int buttonWidth = Scale(52);
+            int buttonHeight = Scale(34);
+            int gap = Scale(4);
+            int colorWidth = Scale(28);
+            int pad = Scale(6);
+            int count = tools.Length + 2 + Palette.Length;
+            int totalWidth = tools.Length * buttonWidth + 2 * buttonWidth + Palette.Length * colorWidth +
+                             gap * (count + 2) + pad * 2;
+            int x = (ClientSize.Width - totalWidth) / 2;
+            if (x < Scale(4))
+            {
+                x = Scale(4);
+            }
+            int y = Scale(16);
+
+            for (int i = 0; i < tools.Length; i++)
+            {
+                ToolbarItem item = new ToolbarItem();
+                item.Bounds = new Rectangle(x, y, buttonWidth, buttonHeight);
+                item.Action = ToolbarAction.Tool;
+                item.Tool = tools[i];
+                item.Label = labels[i];
+                items.Add(item);
+                x += buttonWidth + gap;
+            }
+
+            x += gap;
+            AddActionItem(items, x, y, buttonWidth, buttonHeight, gap, ToolbarAction.Undo, "撤销", out x);
+            AddActionItem(items, x, y, buttonWidth, buttonHeight, gap, ToolbarAction.Clear, "清空", out x);
+
+            x += gap;
+            for (int i = 0; i < Palette.Length; i++)
+            {
+                ToolbarItem item = new ToolbarItem();
+                item.Bounds = new Rectangle(x, y, colorWidth, buttonHeight);
+                item.Action = ToolbarAction.Color;
+                item.ColorIndex = i;
+                items.Add(item);
+                x += colorWidth + gap;
+            }
+            return items;
+        }
+
+        private static void AddActionItem(List<ToolbarItem> items, int x, int y, int width, int height,
+            int gap, ToolbarAction action, string label, out int nextX)
+        {
+            ToolbarItem item = new ToolbarItem();
+            item.Bounds = new Rectangle(x, y, width, height);
+            item.Action = action;
+            item.Label = label;
+            items.Add(item);
+            nextX = x + width + gap;
+        }
+
+        private Rectangle GetToolbarPanel()
+        {
+            List<ToolbarItem> items = GetToolbarItems();
+            if (items.Count == 0)
+            {
+                return Rectangle.Empty;
+            }
+            int pad = Scale(6);
+            Rectangle first = items[0].Bounds;
+            Rectangle last = items[items.Count - 1].Bounds;
+            return new Rectangle(first.Left - pad, first.Top - pad,
+                last.Right - first.Left + pad * 2, first.Height + pad * 2);
+        }
+
+        private void DrawToolbar(Graphics graphics)
+        {
+            List<ToolbarItem> items = GetToolbarItems();
+            if (items.Count == 0)
+            {
+                return;
+            }
+            Rectangle panel = GetToolbarPanel();
+            using (GraphicsPath path = Theme.RoundedRect(panel, Scale(8)))
+            using (SolidBrush fill = new SolidBrush(Theme.Panel))
+            using (Pen border = new Pen(Theme.Border, 1.0f))
+            {
+                graphics.FillPath(fill, path);
+                graphics.DrawPath(border, path);
+            }
+
+            using (StringFormat centered = new StringFormat())
+            {
+                centered.Alignment = StringAlignment.Center;
+                centered.LineAlignment = StringAlignment.Center;
+                centered.FormatFlags = StringFormatFlags.NoWrap;
+                for (int i = 0; i < items.Count; i++)
+                {
+                    ToolbarItem item = items[i];
+                    bool hover = (i == _hoverToolbarIndex);
+                    if (item.Action == ToolbarAction.Color)
+                    {
+                        DrawColorSwatch(graphics, item, hover);
+                        continue;
+                    }
+
+                    bool selected = item.Action == ToolbarAction.Tool && _tool == item.Tool;
+                    if (selected)
+                    {
+                        Theme.FillRounded(graphics, item.Bounds, Scale(5), Theme.Accent);
+                    }
+                    else if (hover)
+                    {
+                        Theme.FillRounded(graphics, item.Bounds, Scale(5), Theme.AccentSoft);
+                    }
+                    bool muted = (item.Action == ToolbarAction.Undo || item.Action == ToolbarAction.Clear) &&
+                                 _annotations.Count == 0;
+                    Color textColor = selected ? Color.White : (muted ? Theme.Muted : Theme.Text);
+                    using (SolidBrush text = new SolidBrush(textColor))
+                    {
+                        graphics.DrawString(item.Label, Theme.UiFont, text, item.Bounds, centered);
+                    }
+                }
+            }
+        }
+
+        private void DrawColorSwatch(Graphics graphics, ToolbarItem item, bool hover)
+        {
+            int size = Scale(20);
+            int cx = item.Bounds.Left + item.Bounds.Width / 2;
+            int cy = item.Bounds.Top + item.Bounds.Height / 2;
+            Rectangle circle = new Rectangle(cx - size / 2, cy - size / 2, size, size);
+            Color color = Palette[item.ColorIndex];
+            using (SolidBrush fill = new SolidBrush(color))
+            using (Pen edge = new Pen(Color.FromArgb(120, 0, 0, 0), 1.0f))
+            {
+                graphics.FillEllipse(fill, circle);
+                graphics.DrawEllipse(edge, circle);
+            }
+            bool selected = (_annotationColor.ToArgb() == color.ToArgb());
+            if (selected || hover)
+            {
+                int ring = selected ? Scale(3) : Scale(1);
+                int grow = ring + Scale(1);
+                using (Pen pen = new Pen(selected ? Color.White : Theme.AccentSoft, ring))
+                {
+                    graphics.DrawEllipse(pen, circle.Left - grow, circle.Top - grow,
+                        circle.Width + grow * 2, circle.Height + grow * 2);
+                }
+            }
+        }
+
+        private int HitToolbar(Point point)
+        {
+            List<ToolbarItem> items = GetToolbarItems();
+            for (int i = 0; i < items.Count; i++)
+            {
+                if (items[i].Bounds.Contains(point))
+                {
+                    return i;
+                }
+            }
+            return -1;
+        }
+
+        private void ExecuteToolbar(int index)
+        {
+            List<ToolbarItem> items = GetToolbarItems();
+            if (index < 0 || index >= items.Count)
+            {
+                return;
+            }
+            ToolbarItem item = items[index];
+            switch (item.Action)
+            {
+                case ToolbarAction.Tool:
+                    _tool = item.Tool;
+                    _mode = DragMode.None;
+                    _hoverHandle = DragMode.None;
+                    _pressedConfirm = false;
+                    _drawing = false;
+                    break;
+                case ToolbarAction.Undo:
+                    if (_annotations.Count > 0)
+                    {
+                        _annotations.RemoveAt(_annotations.Count - 1);
+                    }
+                    break;
+                case ToolbarAction.Clear:
+                    _annotations.Clear();
+                    break;
+                case ToolbarAction.Color:
+                    _annotationColor = Palette[item.ColorIndex];
+                    break;
+            }
+            _hoverToolbarIndex = index;
+            Cursor = _tool == ToolMode.Text ? Cursors.IBeam : Cursors.Cross;
+            Invalidate();
+        }
+
         private void DrawHint(Graphics graphics)
         {
-            string hint = _hasSelection
-                ? "拖动边/角调整 · 拖动选区移动 · Enter/双击 确认 · Esc 取消"
-                : "拖动鼠标选择区域 · Esc 取消";
-            SizeF size = graphics.MeasureString(hint, Theme.UiFont);
-            int paddingX = Scale(14);
-            int paddingY = Scale(7);
+            string hint;
+            Font font;
+            int y;
+            if (!_hasSelection)
+            {
+                hint = "拖动鼠标选择区域 · Esc 取消";
+                font = Theme.UiFont;
+                y = Scale(22);
+            }
+            else
+            {
+                if (_mode == DragMode.Creating)
+                {
+                    return;
+                }
+                if (_tool == ToolMode.Adjust)
+                {
+                    hint = "拖动边/角或选区调整 · Enter/双击 确认 · Esc 取消";
+                }
+                else if (_tool == ToolMode.Text)
+                {
+                    hint = "点击选区输入文字 · 点『调整』可微调选区 · Esc 取消";
+                }
+                else
+                {
+                    hint = "在选区内拖动绘制 · 点『调整』可微调选区 · Esc 取消";
+                }
+                font = Theme.SmallFont;
+                Rectangle panel = GetToolbarPanel();
+                y = (panel == Rectangle.Empty ? Scale(22) : panel.Bottom + Scale(2));
+            }
+
+            SizeF size = graphics.MeasureString(hint, font);
+            int paddingX = Scale(12);
+            int paddingY = Scale(5);
             int width = (int)Math.Ceiling(size.Width) + paddingX * 2;
             int height = (int)Math.Ceiling(size.Height) + paddingY * 2;
             int x = (ClientSize.Width - width) / 2;
-            int y = Scale(22);
             if (x < Scale(4))
             {
                 x = Scale(4);
             }
             Rectangle box = new Rectangle(x, y, width, height);
-            Theme.FillRounded(graphics, box, Scale(7), Theme.Panel);
+            Theme.FillRounded(graphics, box, Scale(6), Theme.PanelSoft);
             using (SolidBrush textBrush = new SolidBrush(Theme.Text))
             {
-                graphics.DrawString(hint, Theme.UiFont, textBrush, box.Left + paddingX, box.Top + paddingY);
+                graphics.DrawString(hint, font, textBrush, box.Left + paddingX, box.Top + paddingY);
             }
         }
 
@@ -303,6 +730,10 @@ namespace ShotPin.UI
 
         private DragMode HitHandle(Point point)
         {
+            if (_tool != ToolMode.Adjust)
+            {
+                return DragMode.None;
+            }
             Rectangle selection = GetLocalSelection();
             if (selection.Width < 3 || selection.Height < 3)
             {
@@ -345,33 +776,52 @@ namespace ShotPin.UI
 
         private void UpdateHover(Point point)
         {
+            int toolbarIndex = HitToolbar(point);
             Rectangle confirm = GetConfirmButtonRect();
-            bool hoverConfirm = confirm != Rectangle.Empty && confirm.Contains(point);
+            bool hoverConfirm = toolbarIndex < 0 && confirm != Rectangle.Empty && confirm.Contains(point);
             DragMode handle = DragMode.None;
-            if (!hoverConfirm)
+            if (toolbarIndex < 0 && !hoverConfirm && _tool == ToolMode.Adjust)
             {
                 handle = HitHandle(point);
             }
 
             Cursor cursor;
-            if (hoverConfirm)
+            if (toolbarIndex >= 0)
             {
                 cursor = Cursors.Hand;
             }
-            else if (handle != DragMode.None)
+            else if (hoverConfirm)
             {
-                cursor = CursorFor(handle);
+                cursor = Cursors.Hand;
+            }
+            else if (_tool == ToolMode.Adjust)
+            {
+                if (handle != DragMode.None)
+                {
+                    cursor = CursorFor(handle);
+                }
+                else if (_hasSelection && GetLocalSelection().Contains(point))
+                {
+                    cursor = Cursors.SizeAll;
+                }
+                else
+                {
+                    cursor = Cursors.Cross;
+                }
             }
             else if (_hasSelection && GetLocalSelection().Contains(point))
             {
-                cursor = Cursors.SizeAll;
+                cursor = _tool == ToolMode.Text ? Cursors.IBeam : Cursors.Cross;
             }
             else
             {
                 cursor = Cursors.Cross;
             }
 
-            bool changed = (hoverConfirm != _hoverConfirm) || (handle != _hoverHandle);
+            bool changed = (toolbarIndex != _hoverToolbarIndex) ||
+                           (hoverConfirm != _hoverConfirm) ||
+                           (handle != _hoverHandle);
+            _hoverToolbarIndex = toolbarIndex;
             _hoverConfirm = hoverConfirm;
             _hoverHandle = handle;
             Cursor = cursor;
@@ -395,6 +845,19 @@ namespace ShotPin.UI
             }
 
             _anchor = e.Location;
+
+            int toolbarIndex = HitToolbar(e.Location);
+            if (toolbarIndex >= 0)
+            {
+                ExecuteToolbar(toolbarIndex);
+                return;
+            }
+            Rectangle toolbarPanel = GetToolbarPanel();
+            if (!toolbarPanel.IsEmpty && toolbarPanel.Contains(e.Location))
+            {
+                return;
+            }
+
             if (_hasSelection)
             {
                 Rectangle confirm = GetConfirmButtonRect();
@@ -407,22 +870,45 @@ namespace ShotPin.UI
                     return;
                 }
 
-                DragMode handle = HitHandle(e.Location);
-                if (handle != DragMode.None)
+                if (_tool == ToolMode.Adjust)
                 {
-                    _mode = handle;
-                    _selectionAtDragStart = GetLocalSelection();
-                    Capture = true;
-                    Invalidate();
-                    return;
-                }
+                    DragMode handle = HitHandle(e.Location);
+                    if (handle != DragMode.None)
+                    {
+                        _mode = handle;
+                        _selectionAtDragStart = GetLocalSelection();
+                        Capture = true;
+                        Invalidate();
+                        return;
+                    }
 
-                if (GetLocalSelection().Contains(e.Location))
+                    if (GetLocalSelection().Contains(e.Location))
+                    {
+                        _mode = DragMode.Moving;
+                        _selectionAtDragStart = GetLocalSelection();
+                        Capture = true;
+                        Invalidate();
+                        return;
+                    }
+                }
+                else
                 {
-                    _mode = DragMode.Moving;
-                    _selectionAtDragStart = GetLocalSelection();
-                    Capture = true;
-                    Invalidate();
+                    Rectangle selection = GetLocalSelection();
+                    if (selection.Width > 0 && selection.Height > 0 && selection.Contains(e.Location))
+                    {
+                        if (_tool == ToolMode.Text)
+                        {
+                            AddTextAt(e.Location);
+                            return;
+                        }
+                        _drawing = true;
+                        _drawStartLocal = ToLocal(e.Location);
+                        _drawCurrentLocal = _drawStartLocal;
+                        Capture = true;
+                        Invalidate();
+                        return;
+                    }
+                    // 标注模式下点到选区外不创建新选区，避免误清空标注。
                     return;
                 }
             }
@@ -430,9 +916,13 @@ namespace ShotPin.UI
             _mode = DragMode.Creating;
             _selection = Rectangle.Empty;
             _hasSelection = true;
+            _tool = ToolMode.Adjust;
+            _annotations.Clear();
+            _drawing = false;
             _hoverHandle = DragMode.None;
             _hoverConfirm = false;
             _pressedConfirm = false;
+            _hoverToolbarIndex = -1;
             Capture = true;
             Invalidate();
         }
@@ -442,6 +932,12 @@ namespace ShotPin.UI
             base.OnMouseMove(e);
             if (_pressedConfirm)
             {
+                return;
+            }
+            if (_drawing)
+            {
+                _drawCurrentLocal = ToLocal(e.Location);
+                Invalidate();
                 return;
             }
             if (_mode == DragMode.None)
@@ -545,6 +1041,12 @@ namespace ShotPin.UI
                 Invalidate();
                 return;
             }
+            if (_drawing && e.Button == MouseButtons.Left)
+            {
+                FinishDrawing();
+                UpdateHover(e.Location);
+                return;
+            }
             if (e.Button != MouseButtons.Left || _mode == DragMode.None)
             {
                 return;
@@ -560,6 +1062,7 @@ namespace ShotPin.UI
                 _hasSelection = false;
                 _hoverHandle = DragMode.None;
                 _hoverConfirm = false;
+                _hoverToolbarIndex = -1;
             }
             else
             {
@@ -573,7 +1076,10 @@ namespace ShotPin.UI
         protected override void OnMouseDoubleClick(MouseEventArgs e)
         {
             base.OnMouseDoubleClick(e);
-            if (e.Button == MouseButtons.Left && _hasSelection && GetLocalSelection().Contains(e.Location))
+            if (e.Button == MouseButtons.Left &&
+                _tool == ToolMode.Adjust &&
+                _hasSelection &&
+                GetLocalSelection().Contains(e.Location))
             {
                 ConfirmSelection();
             }
@@ -583,6 +1089,13 @@ namespace ShotPin.UI
         {
             if (keyData == Keys.Escape)
             {
+                if (_drawing)
+                {
+                    _drawing = false;
+                    Capture = false;
+                    Invalidate();
+                    return true;
+                }
                 CancelSelection();
                 return true;
             }
@@ -591,7 +1104,17 @@ namespace ShotPin.UI
                 ConfirmSelection();
                 return true;
             }
+            if ((keyData & Keys.Control) == Keys.Control && (keyData & Keys.KeyCode) == Keys.Z)
+            {
+                if (_annotations.Count > 0)
+                {
+                    _annotations.RemoveAt(_annotations.Count - 1);
+                    Invalidate();
+                }
+                return true;
+            }
             if (_hasSelection &&
+                _tool == ToolMode.Adjust &&
                 (keyData == Keys.Left || keyData == Keys.Right || keyData == Keys.Up || keyData == Keys.Down))
             {
                 int step = (keyData & Keys.Shift) == Keys.Shift ? 10 : 1;
@@ -623,8 +1146,96 @@ namespace ShotPin.UI
             return base.ProcessCmdKey(ref msg, keyData);
         }
 
+        private Point ToLocal(Point point)
+        {
+            Rectangle selection = GetLocalSelection();
+            return new Point(point.X - selection.Left, point.Y - selection.Top);
+        }
+
+        private Annotation BuildPreview()
+        {
+            if (!_drawing)
+            {
+                return null;
+            }
+            if (_tool != ToolMode.Line && _tool != ToolMode.Rectangle && _tool != ToolMode.Ellipse)
+            {
+                return null;
+            }
+            Annotation annotation = new Annotation();
+            annotation.Kind = _tool;
+            annotation.Color = _annotationColor;
+            annotation.Start = _drawStartLocal;
+            annotation.End = _drawCurrentLocal;
+            return annotation;
+        }
+
+        private bool IsValidAnnotation(Annotation annotation)
+        {
+            if (annotation == null)
+            {
+                return false;
+            }
+            int min = Math.Max(3, Scale(3));
+            if (annotation.Kind == ToolMode.Line)
+            {
+                return Math.Abs(annotation.End.X - annotation.Start.X) >= min ||
+                       Math.Abs(annotation.End.Y - annotation.Start.Y) >= min;
+            }
+            int width = Math.Abs(annotation.End.X - annotation.Start.X);
+            int height = Math.Abs(annotation.End.Y - annotation.Start.Y);
+            return width >= min && height >= min;
+        }
+
+        private void FinishDrawing()
+        {
+            if (!_drawing)
+            {
+                return;
+            }
+            Annotation annotation = BuildPreview();
+            _drawing = false;
+            Capture = false;
+            if (annotation != null && IsValidAnnotation(annotation))
+            {
+                _annotations.Add(annotation);
+            }
+            Invalidate();
+        }
+
+        private void AddTextAt(Point screenPoint)
+        {
+            Rectangle selection = GetLocalSelection();
+            if (selection.Width <= 0 || selection.Height <= 0 || !selection.Contains(screenPoint))
+            {
+                return;
+            }
+            Point local = ToLocal(screenPoint);
+            using (TextAnnotationDialog dialog = new TextAnnotationDialog())
+            {
+                dialog.TopMost = true;
+                DialogResult result = dialog.ShowDialog(this);
+                Activate();
+                if (result == DialogResult.OK)
+                {
+                    string text = dialog.ResultText;
+                    if (!string.IsNullOrEmpty(text) && text.Trim().Length > 0)
+                    {
+                        Annotation annotation = new Annotation();
+                        annotation.Kind = ToolMode.Text;
+                        annotation.Color = _annotationColor;
+                        annotation.Start = local;
+                        annotation.Text = text;
+                        _annotations.Add(annotation);
+                        Invalidate();
+                    }
+                }
+            }
+        }
+
         private void ConfirmSelection()
         {
+            FinishDrawing();
             Rectangle local = GetLocalSelection();
             if (local.Width < 3 || local.Height < 3)
             {
@@ -636,6 +1247,11 @@ namespace ShotPin.UI
             {
                 CancelSelection();
                 return;
+            }
+
+            using (Graphics graphics = Graphics.FromImage(result))
+            {
+                RenderAnnotations(graphics, 0, 0, result.Width, result.Height, false);
             }
 
             SelectedScreenRect = new Rectangle(
@@ -662,6 +1278,11 @@ namespace ShotPin.UI
                 if (_frozen != null)
                 {
                     _frozen.Dispose();
+                }
+                if (_textFont != null)
+                {
+                    _textFont.Dispose();
+                    _textFont = null;
                 }
             }
             base.Dispose(disposing);
