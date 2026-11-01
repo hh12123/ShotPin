@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Drawing2D;
+using System.Text;
 using System.Windows.Forms;
 using ShotPin.App;
 
@@ -205,6 +206,9 @@ namespace ShotPin.UI
         private bool _textResizing;
         private Point _textResizeStart;
         private Size _textResizeStartSize;
+        private Annotation _movingText;
+        private Point _textDragStart;
+        private Point _textDragOrigin;
 
         public Rectangle SelectedScreenRect { get; private set; }
         public Bitmap ResultBitmap { get; private set; }
@@ -686,7 +690,7 @@ namespace ShotPin.UI
             {
                 return Rectangle.Empty;
             }
-            int size = Scale(12);
+            int size = Scale(10);
             return new Rectangle(_textEditorRect.Right - size, _textEditorRect.Bottom - size, size, size);
         }
 
@@ -723,10 +727,36 @@ namespace ShotPin.UI
             {
                 return;
             }
-            int pad = Scale(12);
+            int pad = Scale(10);
             int width = Math.Max(1, _textEditorRect.Width - pad * 2);
             int height = Math.Max(1, _textEditorRect.Height - pad * 2);
             _textBox.Bounds = new Rectangle(_textEditorRect.Left + pad, _textEditorRect.Top + pad, width, height);
+        }
+
+        private void AutoGrowInlineText()
+        {
+            if (!_editingText || _textBox == null || _textBox.TextLength == 0)
+            {
+                return;
+            }
+            int lineCount = _textBox.GetLineFromCharIndex(_textBox.TextLength) + 1;
+            int pad = Scale(10);
+            int neededHeight = lineCount * Math.Max(1, _textBox.Font.Height) + pad * 2 + Scale(4);
+            if (neededHeight <= _textEditorRect.Height)
+            {
+                return;
+            }
+            Rectangle selection = GetLocalSelection();
+            int maxHeight = Math.Max(1, selection.Bottom - _textEditorRect.Top);
+            int height = Math.Min(maxHeight, neededHeight);
+            if (height <= _textEditorRect.Height)
+            {
+                return;
+            }
+            _textEditorRect = new Rectangle(_textEditorRect.Left, _textEditorRect.Top,
+                _textEditorRect.Width, height);
+            UpdateInlineTextBounds();
+            Invalidate();
         }
 
         private void BeginInlineText(Point screenPoint)
@@ -739,8 +769,13 @@ namespace ShotPin.UI
             }
 
             Point local = ToLocal(screenPoint);
-            int width = Math.Min(Scale(280), selection.Width);
-            int height = Math.Min(Scale(110), selection.Height);
+            // 默认只占选区的一部分，避免小截图里文字框把画面盖满；仍可从右下角拉大。
+            int maxWidth = Math.Max(1, selection.Width - Scale(8));
+            int maxHeight = Math.Max(1, selection.Height - Scale(8));
+            int preferredWidth = Math.Min(Scale(200), Math.Max(Scale(100), selection.Width * 45 / 100));
+            int preferredHeight = Math.Min(Scale(72), Math.Max(Scale(42), selection.Height * 18 / 100));
+            int width = Math.Min(maxWidth, preferredWidth);
+            int height = Math.Min(maxHeight, preferredHeight);
             int x = Math.Max(0, Math.Min(local.X, selection.Width - width));
             int y = Math.Max(0, Math.Min(local.Y, selection.Height - height));
 
@@ -750,11 +785,12 @@ namespace ShotPin.UI
             box.Multiline = true;
             box.WordWrap = true;
             box.AcceptsReturn = true;
-            box.ScrollBars = ScrollBars.Vertical;
+            box.ScrollBars = ScrollBars.None;
             box.BorderStyle = BorderStyle.None;
             box.BackColor = Color.White;
             box.ForeColor = _textEditorColor;
             box.Font = GetTextFont();
+            box.TextChanged += delegate { AutoGrowInlineText(); };
             _textBox = box;
             Controls.Add(box);
             _editingText = true;
@@ -774,6 +810,25 @@ namespace ShotPin.UI
             _textResizeStart = point;
             _textResizeStartSize = _textEditorRect.Size;
             Capture = true;
+        }
+
+        private void MoveInlineText(Point point)
+        {
+            if (_movingText == null)
+            {
+                return;
+            }
+            Rectangle selection = GetLocalSelection();
+            Point local = ToLocal(point);
+            int width = Math.Abs(_movingText.End.X - _movingText.Start.X);
+            int height = Math.Abs(_movingText.End.Y - _movingText.Start.Y);
+            int x = _textDragOrigin.X + (local.X - _textDragStart.X);
+            int y = _textDragOrigin.Y + (local.Y - _textDragStart.Y);
+            x = Math.Max(0, Math.Min(Math.Max(0, selection.Width - width), x));
+            y = Math.Max(0, Math.Min(Math.Max(0, selection.Height - height), y));
+            _movingText.Start = new Point(x, y);
+            _movingText.End = new Point(x + width, y + height);
+            Invalidate();
         }
 
         private void ResizeInlineText(Point point)
@@ -801,27 +856,37 @@ namespace ShotPin.UI
             {
                 return lines;
             }
-            int lineCount = box.GetLineFromCharIndex(box.TextLength) + 1;
-            for (int i = 0; i < lineCount; i++)
+            StringBuilder current = null;
+            int currentLine = -1;
+            for (int i = 0; i < box.TextLength; i++)
             {
-                int start = box.GetFirstCharIndexFromLine(i);
-                if (start < 0 || start > box.TextLength)
+                char character = box.Text[i];
+                if (character == '\r' || character == '\n')
                 {
-                    break;
+                    continue;
                 }
-                int end = (i + 1 < lineCount) ? box.GetFirstCharIndexFromLine(i + 1) : box.TextLength;
-                if (end < start || end > box.TextLength)
+                int line = box.GetLineFromCharIndex(i);
+                if (current == null || line != currentLine)
                 {
-                    end = box.TextLength;
+                    if (current != null)
+                    {
+                        lines.Add(current.ToString());
+                    }
+                    current = new StringBuilder();
+                    currentLine = line;
                 }
-                string line = box.Text.Substring(start, end - start);
-                lines.Add(line.TrimEnd('\r', '\n'));
+                current.Append(character);
+            }
+            if (current != null)
+            {
+                lines.Add(current.ToString());
             }
             return lines;
         }
 
         private void CommitInlineText()
-        {            if (!_editingText || _textBox == null)
+        {
+            if (!_editingText || _textBox == null)
             {
                 return;
             }
@@ -837,6 +902,14 @@ namespace ShotPin.UI
                 annotation.End = new Point(content.Right - selection.Left, content.Bottom - selection.Top);
                 annotation.Text = text;
                 annotation.Lines = ReadDisplayLines(_textBox);
+                int lineHeight = Math.Max(1, _textBox.Font.Height);
+                int neededHeight = annotation.Lines.Count * lineHeight;
+                int maxTextHeight = selection.Bottom - content.Top;
+                if (neededHeight > content.Height && neededHeight <= maxTextHeight)
+                {
+                    annotation.End = new Point(annotation.End.X,
+                        annotation.Start.Y + neededHeight);
+                }
                 _annotations.Add(annotation);
             }
             TextBox box = _textBox;
@@ -891,11 +964,11 @@ namespace ShotPin.UI
                 }
                 if (_tool == ToolMode.Adjust)
                 {
-                    hint = "拖动边/角或选区调整 · Enter/双击 确认 · Esc 取消";
+                    hint = "拖动边/角或选区调整 · 拖动文字移动 · Enter/双击 确认 · Esc 取消";
                 }
                 else if (_tool == ToolMode.Text)
                 {
-                    hint = "点击选区输入文字 · 点『调整』可微调选区 · Esc 取消";
+                    hint = "点击选区输入文字 · 拖动已写文字移动 · Esc 取消";
                 }
                 else
                 {
@@ -1002,13 +1075,50 @@ namespace ShotPin.UI
             }
         }
 
+        private Annotation HitTextAnnotation(Point point)
+        {
+            if (!_hasSelection)
+            {
+                return null;
+            }
+            Rectangle selection = GetLocalSelection();
+            if (selection.Width < 3 || selection.Height < 3)
+            {
+                return null;
+            }
+            Point local = new Point(point.X - selection.Left, point.Y - selection.Top);
+            for (int i = _annotations.Count - 1; i >= 0; i--)
+            {
+                Annotation annotation = _annotations[i];
+                if (annotation.Kind != ToolMode.Text)
+                {
+                    continue;
+                }
+                int left = Math.Min(annotation.Start.X, annotation.End.X);
+                int top = Math.Min(annotation.Start.Y, annotation.End.Y);
+                int right = Math.Max(annotation.Start.X, annotation.End.X);
+                int bottom = Math.Max(annotation.Start.Y, annotation.End.Y);
+                Rectangle box = Rectangle.FromLTRB(left, top, right, bottom);
+                box.Inflate(Scale(3), Scale(3));
+                if (box.Contains(local))
+                {
+                    return annotation;
+                }
+            }
+            return null;
+        }
+
         private void UpdateHover(Point point)
         {
             int toolbarIndex = HitToolbar(point);
             Rectangle confirm = GetConfirmButtonRect();
             bool hoverConfirm = toolbarIndex < 0 && confirm != Rectangle.Empty && confirm.Contains(point);
+            Annotation hoverText = (toolbarIndex < 0 && !hoverConfirm &&
+                                    (_tool == ToolMode.Adjust || _tool == ToolMode.Text))
+                ? HitTextAnnotation(point)
+                : null;
             DragMode handle = DragMode.None;
-            if (toolbarIndex < 0 && !hoverConfirm && _tool == ToolMode.Adjust)
+            if (toolbarIndex < 0 && !hoverConfirm && hoverText == null && _tool == ToolMode.Adjust)
             {
                 handle = HitHandle(point);
             }
@@ -1021,6 +1131,10 @@ namespace ShotPin.UI
             else if (hoverConfirm)
             {
                 cursor = Cursors.Hand;
+            }
+            else if (hoverText != null)
+            {
+                cursor = Cursors.SizeAll;
             }
             else if (_tool == ToolMode.Adjust)
             {
@@ -1130,6 +1244,22 @@ namespace ShotPin.UI
                     return;
                 }
 
+                if (_tool == ToolMode.Adjust || _tool == ToolMode.Text)
+                {
+                    Annotation textHit = HitTextAnnotation(e.Location);
+                    if (textHit != null)
+                    {
+                        _movingText = textHit;
+                        _textDragStart = ToLocal(e.Location);
+                        _textDragOrigin = textHit.Start;
+                        _mode = DragMode.None;
+                        Capture = true;
+                        Cursor = Cursors.SizeAll;
+                        Invalidate();
+                        return;
+                    }
+                }
+
                 if (_tool == ToolMode.Adjust)
                 {
                     DragMode handle = HitHandle(e.Location);
@@ -1192,6 +1322,11 @@ namespace ShotPin.UI
             base.OnMouseMove(e);
             if (_pressedConfirm)
             {
+                return;
+            }
+            if (_movingText != null)
+            {
+                MoveInlineText(e.Location);
                 return;
             }
             if (_textResizing)
@@ -1309,6 +1444,14 @@ namespace ShotPin.UI
         protected override void OnMouseUp(MouseEventArgs e)
         {
             base.OnMouseUp(e);
+            if (_movingText != null)
+            {
+                _movingText = null;
+                Capture = false;
+                UpdateHover(e.Location);
+                Invalidate();
+                return;
+            }
             if (_textResizing)
             {
                 _textResizing = false;
