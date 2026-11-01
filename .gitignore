@@ -26,7 +26,6 @@ Desktop.ini
 
 # 说明：
 # dist/settings.ini 是便携配置，随 exe 放在项目里，需要提交。
-# dist/ShotPin.exe 和 dist/ShotPin.exe.config 目前也在仓库中；如果不想提交二进制，
-# 可执行 git rm --cached dist/ShotPin.exe dist/ShotPin.exe.config 后再取消下面的注释。
+# dist/ShotPin.exe 和 .config 是构建产物，默认不提交；如需发布二进制可用 git add -f。
 /dist/ShotPin.exe
 /dist/ShotPin.exe.config
