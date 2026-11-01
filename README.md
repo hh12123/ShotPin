@@ -95,7 +95,7 @@ dist\logs\app-yyyyMMdd.log
 | 方向键 / `Shift`+方向键 | 移动 1px / 10px（挂着的图只左右移动） |
 | `Esc` / `Delete` | 关闭当前图 |
 
-默认保存目录：`%USERPROFILE%\Pictures\ShotPin`。
+默认保存目录：`%USERPROFILE%\Pictures\ShotPin`。也可以改成项目内目录，例如 `..\pictures`；项目里的 `/pictures/` 已在 `.gitignore` 中忽略，截图不会被提交。
 
 ## 配置
 
@@ -120,6 +120,7 @@ close_all=Ctrl+Alt+Shift+Q
 ```
 
 - `line_y_percent` 是挂线高度占屏幕高度的百分比；运行时拖动左边小绳结会自动更新。
+- `save_dir` 支持绝对路径；如果指向项目里的 `pictures` 目录，该目录会被 `.gitignore` 忽略，不会误提交截图。
 - `line_color` 使用 `#RRGGBB`；`line_width` 为 1–6 像素。
 - 热键格式：`Ctrl+Shift+A`、`Ctrl+Shift+F12`、`Alt+PrintScreen` 等；支持 Ctrl/Alt/Shift/Win、A–Z、0–9、F1–F24、PrintScreen、方向键等。
 - 修改后托盘菜单 →“重新加载设置”，无需重启。

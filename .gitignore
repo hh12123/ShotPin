@@ -1,6 +1,9 @@
 # 构建中间产物
 /build/
 
+# 截图保存目录
+/pictures/
+
 # 运行时日志、诊断和写入探针
 /dist/logs/
 /dist/diag.txt
